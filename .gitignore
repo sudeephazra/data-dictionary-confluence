@@ -1,0 +1,57 @@
+## Typical .gitignore for an Atlassian Confluence macro / plugin project
+
+# Build outputs
+target/
+dist/
+build/
+out/
+
+# Maven
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+
+# Gradle
+.gradle/
+build/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDEs
+.idea/
+*.iml
+*.iws
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Atlassian/SDK specific
+atlassian-plugin.xml~
+*.war
+*.jar
+target-*/
+.osgi-cache/
+local.properties
+
+# Logs, temporary files, credentials
+*.log
+*.tmp
+credentials.properties
+
+# Generated documentation
+site/
+
+# Ignore personal overrides
+local-*.properties
+
