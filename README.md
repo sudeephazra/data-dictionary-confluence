@@ -28,11 +28,17 @@ This template provides a complete Forge app setup with TypeScript, Jest testing,
 3. **Deploy and install:**
 
    ```bash
+   # Register the app before first deploy
+   forge register
+
    # Deploy to Atlassian's infrastructure
    forge deploy
 
    # Install to your development site
    forge install
+
+   # Debug locally with a temporary tunnel
+   forge tunnel
    ```
 
 ## Forge UI Kit Types
