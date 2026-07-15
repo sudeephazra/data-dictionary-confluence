@@ -460,7 +460,8 @@ export const App = (): JSX.Element => {
         {/* Metadata Header */}
         <Box xcss={metadataContainerStyles}>
           <Stack space="space.150">
-            <Heading as="h4">Table Metadata</Heading>
+            <Heading as="h4">Table Metadata*</Heading>
+            <Text color="color.text.accent.gray" size="small" weight="semibold" as="em">*Only one table available per page</Text>
             <Inline space="space.200" spread="space-between">
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Service</Text>
