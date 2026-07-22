@@ -231,6 +231,7 @@ export const App = (): JSX.Element => {
   const context = useProductContext();
   const preview = useMemo(() => isPreviewMode(), []);
   const storageKey = useMemo(() => getStorageKey(context), [context]);
+  const isEditing = context?.extension?.isEditing ?? false;
 
   const [rows, setRows] = useState<TableRow[]>(() => (preview ? MOCK_ROWS : []));
   const [metadata, setMetadata] = useState<TableMetadata>(() => preview ? MOCK_METADATA : getDefaultMetadata());
@@ -465,11 +466,11 @@ export const App = (): JSX.Element => {
             <Inline space="space.200" spread="space-between">
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Service</Text>
-                <Textfield value={metadata.service} onChange={handleServiceChange} placeholder="e.g. user-service" />
+                <Textfield value={metadata.service} onChange={handleServiceChange} placeholder="e.g. user-service" isDisabled={!isEditing} />
               </Stack>
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Table Name</Text>
-                <Textfield value={metadata.tableName} onChange={handleTableNameChange} placeholder="e.g. users" />
+                <Textfield value={metadata.tableName} onChange={handleTableNameChange} placeholder="e.g. users" isDisabled={!isEditing} />
               </Stack>
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Environment</Text>
@@ -479,13 +480,14 @@ export const App = (): JSX.Element => {
                     onChange={handleEnvironmentChange}
                     placeholder="Select environment"
                     isClearable
+                    isDisabled={!isEditing}
                 />
               </Stack>
             </Inline>
             <Inline space="space.200" spread="space-between">
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Business Reason</Text>
-                <Textfield value={metadata.businessReason} onChange={handleBusinessReasonChange} placeholder="e.g. Stores user account data" />
+                <Textfield value={metadata.businessReason} onChange={handleBusinessReasonChange} placeholder="e.g. Stores user account data" isDisabled={!isEditing} />
               </Stack>
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Load Type</Text>
@@ -495,6 +497,7 @@ export const App = (): JSX.Element => {
                   onChange={handleLoadTypeChange}
                   placeholder="Select load type"
                   isClearable
+                  isDisabled={!isEditing}
                 />
               </Stack>
             </Inline>
@@ -567,6 +570,7 @@ export const App = (): JSX.Element => {
                         value={row.columnName}
                         onChange={(e: { target?: { value?: string } }) => handleColumnNameChange(row.id, e.target?.value ?? '')}
                         placeholder="Required"
+                        isDisabled={!isEditing}
                       />
                     </Box>
                     {columnNameError && (
@@ -586,6 +590,7 @@ export const App = (): JSX.Element => {
                         value={row.dataType ? { label: row.dataType, value: row.dataType } : null}
                         onChange={(option: { label: string; value: string } | null) => handleDataTypeChange(row.id, option)}
                         placeholder="Select type"
+                        isDisabled={!isEditing}
                       />
                     </Box>
                     {dataTypeError && (
@@ -606,6 +611,7 @@ export const App = (): JSX.Element => {
                           value={row.length}
                           onChange={(e: { target?: { value?: string } }) => handleLengthChange(row.id, e.target?.value ?? '')}
                           placeholder={isLengthRequired ? 'Required' : 'Optional'}
+                          isDisabled={!isEditing}
                         />
                         {isLengthRequired && (
                           <Text color="color.text.danger" weight="bold">
@@ -628,6 +634,7 @@ export const App = (): JSX.Element => {
                     <Checkbox
                       isChecked={row.nullable}
                       onChange={(e) => handleNullableChange(row.id, e.target.checked ?? false)}
+                      isDisabled={!isEditing}
                     />
                   </Inline>
                 </Box>
@@ -640,6 +647,7 @@ export const App = (): JSX.Element => {
                     onChange={(option: { label: string; value: string } | null) => handleSortPartitionKeyChange(row.id, option)}
                     placeholder="Optional"
                     isClearable
+                    isDisabled={!isEditing}
                   />
                 </Box>
 
@@ -649,6 +657,7 @@ export const App = (): JSX.Element => {
                     <Checkbox
                       isChecked={row.copyToRedshift}
                       onChange={(e) => handleCopyToRedshiftChange(row.id, e.target.checked ?? false)}
+                      isDisabled={!isEditing}
                     />
                   </Inline>
                 </Box>
@@ -661,6 +670,7 @@ export const App = (): JSX.Element => {
                         value={row.sampleValue}
                         onChange={(e: { target?: { value?: string } }) => handleSampleValueChange(row.id, e.target?.value ?? '')}
                         placeholder="Required"
+                        isDisabled={!isEditing}
                       />
                     </Box>
                     {sampleValueError && (
@@ -677,13 +687,14 @@ export const App = (): JSX.Element => {
                     <Checkbox
                       isChecked={row.pii}
                       onChange={(e) => handlePiiChange(row.id, e.target.checked ?? false)}
+                      isDisabled={!isEditing}
                     />
                   </Inline>
                 </Box>
 
                 {/* Actions */}
                 <Box xcss={colActionsStyles}>
-                  <Button appearance="danger" onClick={() => handleDeleteRow(row.id)}>
+                  <Button appearance="danger" onClick={() => handleDeleteRow(row.id)} isDisabled={!isEditing}>
                     ✕
                   </Button>
                 </Box>
@@ -702,10 +713,10 @@ export const App = (): JSX.Element => {
         {/* Action buttons */}
         <Box xcss={buttonRowStyles}>
           <Inline space="space.100">
-            <Button appearance="default" onClick={handleAddRow}>
+            <Button appearance="default" onClick={handleAddRow} isDisabled={!isEditing}>
               Add Row
             </Button>
-            <Button appearance="primary" onClick={handleSave} isDisabled={saving}>
+            <Button appearance="primary" onClick={handleSave} isDisabled={saving || !isEditing}>
               {saving ? 'Saving...' : 'Save'}
             </Button>
           </Inline>
