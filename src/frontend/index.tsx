@@ -48,6 +48,9 @@ const MOCK_METADATA: TableMetadata = {
   environment: 'production',
   businessReason: 'Stores user account data',
   loadType: 'Insert only',
+  contactNameEmail: 'John Doe (john.doe@internet.com)',
+  teamNameEmail: 'User Service Team',
+  managerNameEmail: 'Jane Doe (jane.doe@internet.com)'
 };
 
 const MOCK_ROWS: TableRow[] = [
@@ -381,6 +384,27 @@ export const App = (): JSX.Element => {
     [],
   );
 
+  const handleContactNameEmailChange = useCallback(
+    (e: { target?: { value?: string } }) => {
+      setMetadata((prev) => ({ ...prev, contactNameEmail: e.target?.value ?? '' }));
+    },
+    [],
+  );
+
+  const handleTeamNameEmailChange = useCallback(
+    (e: { target?: { value?: string } }) => {
+      setMetadata((prev) => ({ ...prev, teamNameEmail: e.target?.value ?? '' }));
+    },
+    [],
+  );
+
+  const handleManagerNameEmailChange = useCallback(
+    (e: { target?: { value?: string } }) => {
+      setMetadata((prev) => ({ ...prev, managerNameEmail: e.target?.value ?? '' }));
+    },
+    [],
+  );
+
   const handleAddRow = useCallback(() => {
     const newRow: TableRow = {
       id: uuid(),
@@ -499,6 +523,20 @@ export const App = (): JSX.Element => {
                   isClearable
                   isDisabled={!isEditing}
                 />
+              </Stack>
+            </Inline>
+            <Inline space="space.200" spread="space-between">
+              <Stack space="space.050" grow="fill">
+                <Text weight="bold" size="small">Contact Name (Email)</Text>
+                <Textfield value={metadata.contactNameEmail} onChange={handleContactNameEmailChange} placeholder="e.g. Name and Email of the contact person responsible for this table" isDisabled={!isEditing} />
+              </Stack>
+              <Stack space="space.050" grow="fill">
+                <Text weight="bold" size="small">Team Name (Email)</Text>
+                <Textfield value={metadata.teamNameEmail} onChange={handleTeamNameEmailChange} placeholder="e.g. Name and Email of the team responsible for this table" isDisabled={!isEditing} />
+              </Stack>
+              <Stack space="space.050" grow="fill">
+                <Text weight="bold" size="small">Manager Name (Email)</Text>
+                <Textfield value={metadata.managerNameEmail} onChange={handleManagerNameEmailChange} placeholder="e.g. Name and Email of the team Manager" isDisabled={!isEditing} />
               </Stack>
             </Inline>
           </Stack>

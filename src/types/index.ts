@@ -56,6 +56,10 @@ export interface TableMetadata {
   businessReason: string;
   /** One of "Insert only", "Updatable", or null if not set */
   loadType: LoadType | null;
+  contactNameEmail: string;
+  teamNameEmail: string;
+  managerNameEmail: string;
+
 }
 
 /** Returns a default empty TableMetadata object */
@@ -66,6 +70,9 @@ export function getDefaultMetadata(): TableMetadata {
     environment: null,
     businessReason: '',
     loadType: null,
+    contactNameEmail: '',
+    teamNameEmail: '',
+    managerNameEmail: ''
   };
 }
 
