@@ -1,0 +1,30 @@
+modules:
+  macro:
+    - key: redshift-data-dictionary
+      resource: main
+      resolver:
+        function: resolver
+      render: native
+      title: Redshift Data Dictionary
+      description: An interactive editable table macro for Confluence pages
+      icon: resource:images;data-dictionary.png
+      config:
+        resource: main
+        render: native
+        viewportSize: max
+        openOnInsert: true
+  function:
+    - key: resolver
+      handler: index.handler
+resources:
+  - key: main
+    path: src/frontend/index.tsx
+  - key: images
+    path: static/images
+permissions:
+  scopes:
+    - storage:app
+app:
+  runtime:
+    name: nodejs22.x
+  id: ari:cloud:ecosystem::app/515b86ca-edbd-4de6-8bbf-d49ea621101f
