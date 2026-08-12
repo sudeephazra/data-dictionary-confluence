@@ -16,8 +16,6 @@ import ForgeReconciler, {
   useConfig,
   useProductContext,
 } from '@forge/react';
-import StatusSuccessIcon from '@atlaskit/icon/core/status-success';
-import CrossCircleIcon from '@atlaskit/icon/core/cross-circle';
 import { invoke, view } from '@forge/bridge';
 import { v4 as uuid } from 'uuid';
 import { setupGlobalErrorHandlers, logError, ErrorBoundary } from './utils/errorLogger';
@@ -241,7 +239,7 @@ export const App = (): JSX.Element => {
   const { storageKey, legacyStorageKey } = useMemo(() => getStorageIdentity(context), [context]);
   const isPageEditing = context?.extension?.isEditing ?? false;
   const isConfiguring = context?.extension?.macro?.isConfiguring === true;
-  const canEdit = preview || isConfiguring;
+  const configurationReady = config !== undefined;
   const configValue = config?.[TABLE_DATA_CONFIG_KEY];
   const hasConfigValue = typeof configValue === 'string' && configValue.length > 0;
   const configuredTableData = useMemo(() => parseMacroTableData(configValue), [configValue]);
@@ -256,25 +254,53 @@ export const App = (): JSX.Element => {
   const [legacyLoadComplete, setLegacyLoadComplete] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const rows = !hasLocalEdits && configuredTableData ? configuredTableData.rows : localRows;
   const metadata = !hasLocalEdits && configuredTableData ? configuredTableData.metadata : localMetadata;
+  const canEdit = preview || (isConfiguring && configurationReady);
   const validationErrors = useMemo(() => validateRows(rows), [rows]);
   const configurationError = hasConfigValue && !configuredTableData
     ? 'The saved table configuration is invalid. Edit the macro to repair it.'
     : null;
-  const loading = !preview
-    && !configuredTableData
-    && !hasConfigValue
-    && Boolean(storageKey)
-    && !legacyLoadComplete;
+  const loading = !preview && (
+    !configurationReady
+    || (
+      !configuredTableData
+      && !hasConfigValue
+      && Boolean(storageKey)
+      && !legacyLoadComplete
+    )
+  );
   const rowsRef = useRef(rows);
   const metadataRef = useRef(metadata);
-  const submitQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const savedRowsRef = useRef<TableRow[]>(rows);
+  const savedMetadataRef = useRef<TableMetadata>(metadata);
+  const hasLocalEditsRef = useRef(false);
+  const savePromiseRef = useRef<Promise<void> | null>(null);
+  const isSubmittingRef = useRef(false);
+  const isCancellingRef = useRef(false);
 
   useEffect(() => {
     rowsRef.current = rows;
     metadataRef.current = metadata;
   }, [rows, metadata]);
+
+  // Capture the saved macro configuration as the edit-session baseline once
+  // useConfig has hydrated. This must happen before local edits so an initially
+  // undefined config cannot be mistaken for an empty table.
+  useEffect(() => {
+    if (preview || hasLocalEditsRef.current || !configuredTableData) {
+      return;
+    }
+
+    rowsRef.current = configuredTableData.rows;
+    metadataRef.current = configuredTableData.metadata;
+    savedRowsRef.current = configuredTableData.rows;
+    savedMetadataRef.current = configuredTableData.metadata;
+    setRows(configuredTableData.rows);
+    setMetadata(configuredTableData.metadata);
+  }, [configuredTableData, preview]);
   // Set up global error handlers on app initialization
   useEffect(() => {
     setupGlobalErrorHandlers();
@@ -283,7 +309,7 @@ export const App = (): JSX.Element => {
   // Macro configuration is the source of truth. KVS is retained as a read-only
   // fallback so existing macro instances transition without losing data.
   useEffect(() => {
-    if (preview || configuredTableData || hasConfigValue || !storageKey) {
+    if (!configurationReady || preview || configuredTableData || hasConfigValue || !storageKey) {
       return;
     }
 
@@ -293,6 +319,8 @@ export const App = (): JSX.Element => {
         const nextMetadata = data?.metadata ?? getDefaultMetadata();
         rowsRef.current = nextRows;
         metadataRef.current = nextMetadata;
+        savedRowsRef.current = nextRows;
+        savedMetadataRef.current = nextMetadata;
         setRows(nextRows);
         setMetadata(nextMetadata);
         setLegacyLoadComplete(true);
@@ -306,185 +334,257 @@ export const App = (): JSX.Element => {
         setLoadError('Failed to load the saved table data. Refresh the page to try again.');
         setLegacyLoadComplete(true);
       });
-  }, [configuredTableData, hasConfigValue, storageKey, legacyStorageKey, preview]);
+  }, [configurationReady, configuredTableData, hasConfigValue, storageKey, legacyStorageKey, preview]);
 
-  const persistPageDraft = useCallback((nextRows: TableRow[], nextMetadata: TableMetadata) => {
+  const saveChanges = useCallback((): Promise<void> => {
     if (!isConfiguring || preview) {
-      return;
+      return Promise.resolve();
     }
 
-    const serialized = serializeMacroTableData(nextMetadata, nextRows);
-    const submission = submitQueueRef.current
-      .catch(() => undefined)
+    if (savePromiseRef.current) {
+      return savePromiseRef.current;
+    }
+
+    setIsSaving(true);
+    setPersistenceError(null);
+    isSubmittingRef.current = true;
+    const rowsToSave = hasLocalEditsRef.current
+      ? rowsRef.current
+      : configuredTableData?.rows ?? rowsRef.current;
+    const metadataToSave = hasLocalEditsRef.current
+      ? metadataRef.current
+      : configuredTableData?.metadata ?? metadataRef.current;
+    const serialized = serializeMacroTableData(metadataToSave, rowsToSave);
+    const savePromise = Promise.resolve()
       .then(() => view.submit({
         config: { [TABLE_DATA_CONFIG_KEY]: serialized },
-        keepEditing: true,
-      }));
-
-    submitQueueRef.current = submission;
-    void submission
-      .then(() => setPersistenceError(null))
+      }))
       .catch((error: unknown) => {
+        isSubmittingRef.current = false;
+        savePromiseRef.current = null;
+        setIsSaving(false);
         const err = error instanceof Error ? error : new Error(String(error));
-        console.error('Failed to update the Confluence page draft:', err);
+        console.error('Failed to save the macro configuration:', err);
         logError({
-          message: 'Failed to update the Confluence page draft',
+          message: 'Failed to save the macro configuration',
           stack: err.stack || String(err),
         });
-        setPersistenceError('Changes could not be added to the page draft. Try editing the field again.');
+        setPersistenceError('Changes could not be saved. Try again.');
+        throw err;
       });
-  }, [isConfiguring, preview]);
+
+    savePromiseRef.current = savePromise;
+    return savePromise;
+  }, [configuredTableData, isConfiguring, preview]);
 
   useEffect(() => {
-    if (!isConfiguring || preview) {
+    if (!configurationReady || !isConfiguring || preview) {
       return;
     }
 
     void view.onClose(async () => {
-      await submitQueueRef.current.catch(() => undefined);
+      if (!isCancellingRef.current && !isSubmittingRef.current) {
+        await saveChanges();
+      }
     });
-  }, [isConfiguring, preview]);
+  }, [configurationReady, isConfiguring, preview, saveChanges]);
+
+  const handleSave = useCallback(() => {
+    void saveChanges().catch(() => undefined);
+  }, [saveChanges]);
+
+  const handleCancel = useCallback(() => {
+    if (isSaving || isCancelling) {
+      return;
+    }
+
+    isCancellingRef.current = true;
+    setIsCancelling(true);
+    const rowsToRestore = configuredTableData?.rows ?? savedRowsRef.current;
+    const metadataToRestore = configuredTableData?.metadata ?? savedMetadataRef.current;
+    rowsRef.current = rowsToRestore;
+    metadataRef.current = metadataToRestore;
+    savedRowsRef.current = rowsToRestore;
+    savedMetadataRef.current = metadataToRestore;
+    hasLocalEditsRef.current = false;
+    setRows(rowsToRestore);
+    setMetadata(metadataToRestore);
+    setHasLocalEdits(false);
+    setPersistenceError(null);
+
+    void view.close().catch((error: unknown) => {
+      isCancellingRef.current = false;
+      setIsCancelling(false);
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.error('Failed to close the macro configuration editor:', err);
+      logError({
+        message: 'Failed to close the macro configuration editor',
+        stack: err.stack || String(err),
+      });
+      setPersistenceError('Edits were discarded, but the editor could not be closed. Try again.');
+    });
+  }, [configuredTableData, isCancelling, isSaving]);
 
   const replaceRows = useCallback((nextRows: TableRow[]) => {
+    if (!hasLocalEditsRef.current && configuredTableData) {
+      metadataRef.current = configuredTableData.metadata;
+      savedRowsRef.current = configuredTableData.rows;
+      savedMetadataRef.current = configuredTableData.metadata;
+    }
     rowsRef.current = nextRows;
+    hasLocalEditsRef.current = true;
     setHasLocalEdits(true);
     setRows(nextRows);
-    persistPageDraft(nextRows, metadataRef.current);
-  }, [persistPageDraft]);
+  }, [configuredTableData]);
 
   const replaceMetadata = useCallback((nextMetadata: TableMetadata) => {
+    if (!hasLocalEditsRef.current && configuredTableData) {
+      rowsRef.current = configuredTableData.rows;
+      savedRowsRef.current = configuredTableData.rows;
+      savedMetadataRef.current = configuredTableData.metadata;
+    }
     metadataRef.current = nextMetadata;
+    hasLocalEditsRef.current = true;
     setHasLocalEdits(true);
     setMetadata(nextMetadata);
-    persistPageDraft(rowsRef.current, nextMetadata);
-  }, [persistPageDraft]);
+  }, [configuredTableData]);
+
+  const getSessionRows = useCallback(() => (
+    hasLocalEditsRef.current ? rowsRef.current : configuredTableData?.rows ?? rowsRef.current
+  ), [configuredTableData]);
+
+  const getSessionMetadata = useCallback(() => (
+    hasLocalEditsRef.current ? metadataRef.current : configuredTableData?.metadata ?? metadataRef.current
+  ), [configuredTableData]);
 
   const handleColumnNameChange = useCallback(
     (rowId: string, value: string) => {
-      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, columnName: value } : row)));
+      replaceRows(getSessionRows().map((row) => (row.id === rowId ? { ...row, columnName: value } : row)));
     },
-    [replaceRows],
+    [getSessionRows, replaceRows],
   );
 
   const handleDataTypeChange = useCallback(
     (rowId: string, option: { label: string; value: string } | null) => {
       replaceRows(
-        rowsRef.current.map((row) =>
+        getSessionRows().map((row) =>
           row.id === rowId ? { ...row, dataType: (option?.value as TableRow['dataType']) ?? null } : row,
         ),
       );
     },
-    [replaceRows],
+    [getSessionRows, replaceRows],
   );
 
   const handleLengthChange = useCallback(
     (rowId: string, value: string) => {
-      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, length: value } : row)));
+      replaceRows(getSessionRows().map((row) => (row.id === rowId ? { ...row, length: value } : row)));
     },
-    [replaceRows],
+    [getSessionRows, replaceRows],
   );
 
   const handleNullableChange = useCallback(
     (rowId: string, isChecked: boolean) => {
-      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, nullable: isChecked } : row)));
+      replaceRows(getSessionRows().map((row) => (row.id === rowId ? { ...row, nullable: isChecked } : row)));
     },
-    [replaceRows],
+    [getSessionRows, replaceRows],
   );
 
   const handleSortPartitionKeyChange = useCallback(
     (rowId: string, option: { label: string; value: string } | null) => {
       replaceRows(
-        rowsRef.current.map((row) =>
+        getSessionRows().map((row) =>
           row.id === rowId
             ? { ...row, sortPartitionKey: (option?.value as TableRow['sortPartitionKey']) ?? null }
             : row,
         ),
       );
     },
-    [replaceRows],
+    [getSessionRows, replaceRows],
   );
 
   const handleCopyToRedshiftChange = useCallback(
     (rowId: string, isChecked: boolean) => {
-      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, copyToRedshift: isChecked } : row)));
+      replaceRows(getSessionRows().map((row) => (
+        row.id === rowId ? { ...row, copyToRedshift: isChecked } : row
+      )));
     },
-    [replaceRows],
+    [getSessionRows, replaceRows],
   );
 
   const handleSampleValueChange = useCallback(
     (rowId: string, value: string) => {
-      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, sampleValue: value } : row)));
+      replaceRows(getSessionRows().map((row) => (row.id === rowId ? { ...row, sampleValue: value } : row)));
     },
-    [replaceRows],
+    [getSessionRows, replaceRows],
   );
 
   const handlePiiChange = useCallback(
     (rowId: string, isChecked: boolean) => {
-      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, pii: isChecked } : row)));
+      replaceRows(getSessionRows().map((row) => (row.id === rowId ? { ...row, pii: isChecked } : row)));
     },
-    [replaceRows],
+    [getSessionRows, replaceRows],
   );
 
   const handleServiceChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      replaceMetadata({ ...metadataRef.current, service: e.target?.value ?? '' });
+      replaceMetadata({ ...getSessionMetadata(), service: e.target?.value ?? '' });
     },
-    [replaceMetadata],
+    [getSessionMetadata, replaceMetadata],
   );
 
   const handleTableNameChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      replaceMetadata({ ...metadataRef.current, tableName: e.target?.value ?? '' });
+      replaceMetadata({ ...getSessionMetadata(), tableName: e.target?.value ?? '' });
     },
-    [replaceMetadata],
+    [getSessionMetadata, replaceMetadata],
   );
 
   const handleEnvironmentChange = useCallback(
     (option: { label: string; value: string } | null) => {
       replaceMetadata({
-        ...metadataRef.current,
+        ...getSessionMetadata(),
         environment: (option?.value as TableMetadata['environment']) ?? null,
       });
     },
-    [replaceMetadata],
+    [getSessionMetadata, replaceMetadata],
   );
 
   const handleBusinessReasonChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      replaceMetadata({ ...metadataRef.current, businessReason: e.target?.value ?? '' });
+      replaceMetadata({ ...getSessionMetadata(), businessReason: e.target?.value ?? '' });
     },
-    [replaceMetadata],
+    [getSessionMetadata, replaceMetadata],
   );
 
   const handleLoadTypeChange = useCallback(
     (option: { label: string; value: string } | null) => {
       replaceMetadata({
-        ...metadataRef.current,
+        ...getSessionMetadata(),
         loadType: (option?.value as TableMetadata['loadType']) ?? null,
       });
     },
-    [replaceMetadata],
+    [getSessionMetadata, replaceMetadata],
   );
 
   const handleContactNameEmailChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      replaceMetadata({ ...metadataRef.current, contactNameEmail: e.target?.value ?? '' });
+      replaceMetadata({ ...getSessionMetadata(), contactNameEmail: e.target?.value ?? '' });
     },
-    [replaceMetadata],
+    [getSessionMetadata, replaceMetadata],
   );
 
   const handleTeamNameEmailChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      replaceMetadata({ ...metadataRef.current, teamNameEmail: e.target?.value ?? '' });
+      replaceMetadata({ ...getSessionMetadata(), teamNameEmail: e.target?.value ?? '' });
     },
-    [replaceMetadata],
+    [getSessionMetadata, replaceMetadata],
   );
 
   const handleManagerNameEmailChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      replaceMetadata({ ...metadataRef.current, managerNameEmail: e.target?.value ?? '' });
+      replaceMetadata({ ...getSessionMetadata(), managerNameEmail: e.target?.value ?? '' });
     },
-    [replaceMetadata],
+    [getSessionMetadata, replaceMetadata],
   );
 
   const handleAddRow = useCallback(() => {
@@ -499,12 +599,12 @@ export const App = (): JSX.Element => {
       sampleValue: '',
       pii: false,
     };
-    replaceRows([...rowsRef.current, newRow]);
-  }, [replaceRows]);
+    replaceRows([...getSessionRows(), newRow]);
+  }, [getSessionRows, replaceRows]);
 
   const handleDeleteRow = useCallback((rowId: string) => {
-    replaceRows(rowsRef.current.filter((row) => row.id !== rowId));
-  }, [replaceRows]);
+    replaceRows(getSessionRows().filter((row) => row.id !== rowId));
+  }, [getSessionRows, replaceRows]);
 
   // Show spinner while loading
   if (loading) {
@@ -520,7 +620,7 @@ export const App = (): JSX.Element => {
       <Stack space="space.200">
         {isConfiguring && (
           <SectionMessage appearance="information">
-            <Text>Changes are added to the page draft automatically and are persisted when you save the Confluence page.</Text>
+            <Text>Changes remain in this editor until you select Save. Cancel discards them.</Text>
           </SectionMessage>
         )}
         {preview && !isConfiguring && (
@@ -863,9 +963,21 @@ export const App = (): JSX.Element => {
         {/* Editing actions */}
         {canEdit && (
           <Box xcss={buttonRowStyles}>
-            <Button appearance="default" onClick={handleAddRow}>
-              Add Row
-            </Button>
+            <Inline spread="space-between" alignBlock="center">
+              <Button appearance="default" onClick={handleAddRow} isDisabled={isSaving || isCancelling}>
+                Add Row
+              </Button>
+              {isConfiguring && !preview && (
+                <Inline space="space.100">
+                  <Button appearance="default" onClick={handleCancel} isDisabled={isSaving || isCancelling}>
+                    {isCancelling ? 'Discarding…' : 'Cancel'}
+                  </Button>
+                  <Button appearance="primary" onClick={handleSave} isDisabled={isSaving || isCancelling}>
+                    {isSaving ? 'Saving…' : 'Save'}
+                  </Button>
+                </Inline>
+              )}
+            </Inline>
           </Box>
         )}
       </Stack>

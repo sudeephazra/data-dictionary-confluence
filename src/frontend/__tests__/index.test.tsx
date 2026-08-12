@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { bridge, view } from '@forge/bridge';
 import { createFrontendContext } from '@forge/testing-framework';
@@ -42,11 +42,13 @@ const metadata: TableMetadata = {
 function setupContext(options: {
   isEditing?: boolean;
   isConfiguring?: boolean;
+  isConfigReady?: boolean;
   configValue?: unknown;
 } = {}): void {
   const config = options.configValue === undefined
     ? {}
     : { [TABLE_DATA_CONFIG_KEY]: options.configValue };
+  const extensionConfig = options.isConfigReady === false ? {} : { config };
 
   bridge.setContext(
     createFrontendContext('confluence:macro', {
@@ -59,7 +61,7 @@ function setupContext(options: {
           key: 'redshift-data-dictionary',
           isConfiguring: options.isConfiguring ?? false,
         },
-        config,
+        ...extensionConfig,
         content: { id: TEST_CONTENT_ID },
       },
     }),
@@ -80,10 +82,16 @@ function configuredValue(rows: TableRow[] = [validRow], tableMetadata: TableMeta
 }
 
 describe('App', () => {
+  let closeHandler: (() => Promise<void>) | undefined;
+
   beforeEach(() => {
     bridge.reset();
     jest.restoreAllMocks();
-    jest.spyOn(view, 'onClose').mockResolvedValue(undefined);
+    closeHandler = undefined;
+    view.close = jest.fn().mockResolvedValue(undefined);
+    jest.spyOn(view, 'onClose').mockImplementation(async (handler) => {
+      closeHandler = handler;
+    });
     jest.spyOn(view, 'submit').mockResolvedValue(undefined);
     delete (window as unknown as Record<string, unknown>).__FORGE_PREVIEW__;
   });
@@ -146,6 +154,7 @@ describe('App', () => {
     expect(screen.getByText(/choose Edit to change the table/i)).toBeInTheDocument();
     expect(screen.queryByText('Add Row')).not.toBeInTheDocument();
     expect(screen.queryByText('Save')).not.toBeInTheDocument();
+    expect(screen.queryByText('Cancel')).not.toBeInTheDocument();
     expect(screen.queryByText('Delete')).not.toBeInTheDocument();
     expect(screen.queryByTestId('forge-textfield')).not.toBeInTheDocument();
     expect(screen.getByText('user-service')).toBeInTheDocument();
@@ -186,16 +195,17 @@ describe('App', () => {
     render(<App />);
 
     await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
-    expect(screen.getByText(/persisted when you save the Confluence page/i)).toBeInTheDocument();
+    expect(screen.getByText(/remain in this editor until you select Save/i)).toBeInTheDocument();
     expect(screen.getByText('Add Row')).toBeInTheDocument();
-    expect(screen.queryByText('Save')).not.toBeInTheDocument();
+    expect(screen.getByText('Save')).toBeInTheDocument();
+    expect(screen.getByText('Cancel')).toBeInTheDocument();
     expect(screen.getAllByTestId('forge-textfield')[0]).not.toHaveAttribute('data-isdisabled', 'true');
     expect(screen.getByText('Delete')).toBeInTheDocument();
     expect(screen.getAllByTestId('forge-checkbox')).toHaveLength(3);
     expect(view.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('submits metadata changes to the Confluence page draft', async () => {
+  it('keeps metadata changes local until Save submits and closes the editor', async () => {
     setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
 
     render(<App />);
@@ -204,37 +214,156 @@ describe('App', () => {
     const serviceField = screen.getAllByTestId('forge-textfield')[0];
     fireEvent.change(serviceField, { target: { value: 'billing-service' } });
 
-    await waitFor(() => expect(view.submit).toHaveBeenCalled());
+    expect(view.submit).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(1));
     const payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as {
       config: Record<string, string>;
-      keepEditing: boolean;
+      keepEditing?: boolean;
     };
     const submitted = parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY]);
-    expect(payload.keepEditing).toBe(true);
+    expect(payload.keepEditing).toBeUndefined();
     expect(submitted?.metadata.service).toBe('billing-service');
     expect(submitted?.rows).toEqual([validRow]);
+    expect(view.close).not.toHaveBeenCalled();
     expect(bridge.invocations.filter((call) => call.functionKey === 'saveTableData')).toHaveLength(0);
   });
 
-  it('adds and removes rows through page-draft submissions', async () => {
+  it('keeps row additions and removals local until Save', async () => {
     setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
 
     render(<App />);
     await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
 
     await userEvent.click(screen.getByText('Add Row'));
-    await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(1));
-
-    let payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as { config: Record<string, string> };
-    expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.rows).toHaveLength(2);
+    expect(view.submit).not.toHaveBeenCalled();
+    expect(screen.getAllByText('Delete')).toHaveLength(2);
 
     await userEvent.click(screen.getAllByText('Delete')[0]);
-    await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(2));
-    payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as { config: Record<string, string> };
+    expect(view.submit).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(1));
+    const payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as { config: Record<string, string> };
     expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.rows).toHaveLength(1);
   });
 
-  it('shows validation feedback immediately without blocking the page draft', async () => {
+  it('preserves a hydrated existing table when a new column is added', async () => {
+    const existingRows: TableRow[] = [
+      validRow,
+      {
+        ...validRow,
+        id: 'row-2',
+        columnName: 'created_at',
+        dataType: 'DateTime',
+        length: '',
+        nullable: true,
+        sortPartitionKey: 'SortKey',
+        sampleValue: '2026-08-12T10:00:00Z',
+        pii: false,
+      },
+    ];
+    const existingMetadata: TableMetadata = {
+      ...metadata,
+      contactNameEmail: 'Data Owner (owner@example.com)',
+      teamNameEmail: 'Data Platform (data@example.com)',
+      managerNameEmail: 'Manager (manager@example.com)',
+    };
+    setupContext({ isEditing: true, isConfiguring: true, isConfigReady: false });
+
+    const rendered = render(<App />);
+
+    expect(screen.getByTestId('forge-spinner')).toBeInTheDocument();
+    expect(screen.queryByText('Add Row')).not.toBeInTheDocument();
+    expect(bridge.invocations.filter((call) => call.functionKey === 'getTableData')).toHaveLength(0);
+
+    setupContext({
+      isEditing: true,
+      isConfiguring: true,
+      configValue: configuredValue(existingRows, existingMetadata),
+    });
+    rendered.rerender(<App />);
+
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
+    expect(screen.getAllByText('Delete')).toHaveLength(2);
+    expect(screen.getAllByTestId('forge-textfield')[0]).toHaveValue('user-service');
+
+    await userEvent.click(screen.getByText('Add Row'));
+    await userEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(1));
+
+    const payload = (view.submit as jest.Mock).mock.calls[0][0] as { config: Record<string, string> };
+    const saved = parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY]);
+    expect(saved?.metadata).toEqual(existingMetadata);
+    expect(saved?.rows.slice(0, existingRows.length)).toEqual(existingRows);
+    expect(saved?.rows).toHaveLength(existingRows.length + 1);
+  });
+
+  it('discards local edits and closes without submitting when Cancel is selected', async () => {
+    setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
+    (view.close as jest.Mock).mockImplementation(async () => {
+      await closeHandler?.();
+    });
+
+    render(<App />);
+    await waitFor(() => expect(closeHandler).toBeDefined());
+
+    const serviceField = screen.getAllByTestId('forge-textfield')[0];
+    fireEvent.change(serviceField, { target: { value: 'unsaved-service' } });
+    await userEvent.click(screen.getByText('Add Row'));
+    expect(serviceField).toHaveValue('unsaved-service');
+    expect(screen.getAllByText('Delete')).toHaveLength(2);
+
+    await userEvent.click(screen.getByText('Cancel'));
+
+    await waitFor(() => expect(view.close).toHaveBeenCalledTimes(1));
+    expect(screen.getAllByTestId('forge-textfield')[0]).toHaveValue('user-service');
+    expect(screen.getAllByText('Delete')).toHaveLength(1);
+    expect(view.submit).not.toHaveBeenCalled();
+    expect(bridge.invocations.filter((call) => call.functionKey === 'saveTableData')).toHaveLength(0);
+  });
+
+  it('uses the same guarded save path for the Save button and modal close action', async () => {
+    setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
+    let submitCompleted = false;
+    (view.submit as jest.Mock).mockImplementation(async () => {
+      await closeHandler?.();
+      submitCompleted = true;
+    });
+
+    render(<App />);
+    await waitFor(() => expect(closeHandler).toBeDefined());
+    fireEvent.change(screen.getAllByTestId('forge-textfield')[0], {
+      target: { value: 'saved-once' },
+    });
+
+    await userEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(submitCompleted).toBe(true));
+    expect(view.submit).toHaveBeenCalledTimes(1);
+    const payload = (view.submit as jest.Mock).mock.calls[0][0] as { config: Record<string, string> };
+    expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.metadata.service).toBe('saved-once');
+  });
+
+  it('saves through the registered callback when the host modal close action is used', async () => {
+    setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
+
+    render(<App />);
+    await waitFor(() => expect(closeHandler).toBeDefined());
+    fireEvent.change(screen.getAllByTestId('forge-textfield')[0], {
+      target: { value: 'saved-by-close' },
+    });
+
+    await act(async () => {
+      await closeHandler?.();
+    });
+
+    expect(view.submit).toHaveBeenCalledTimes(1);
+    const payload = (view.submit as jest.Mock).mock.calls[0][0] as { config: Record<string, string> };
+    expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.metadata.service).toBe('saved-by-close');
+  });
+
+  it('shows validation feedback immediately while editing', async () => {
     const invalidRow: TableRow = {
       ...validRow,
       columnName: '',
@@ -305,18 +434,20 @@ describe('App', () => {
     expect(screen.queryByText(/Sample value exceeds the maximum length/)).not.toBeInTheDocument();
   });
 
-  it('displays page-draft submission failures to the user', async () => {
+  it('displays save failures to the user and keeps the editor open for retry', async () => {
     (view.submit as jest.Mock).mockRejectedValueOnce(new Error('bridge unavailable'));
     setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
 
     render(<App />);
     await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
     fireEvent.change(screen.getAllByTestId('forge-textfield')[0], { target: { value: 'failed-change' } });
+    await userEvent.click(screen.getByText('Save'));
 
     await waitFor(() => {
-      expect(screen.getByText(/could not be added to the page draft/i)).toBeInTheDocument();
+      expect(screen.getByText(/changes could not be saved/i)).toBeInTheDocument();
       expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
     });
+    expect(screen.getByText('Save')).not.toHaveAttribute('data-isdisabled', 'true');
     expect(bridge.invocations.filter((call) => call.functionKey === 'saveTableData')).toHaveLength(0);
   });
 
@@ -329,6 +460,7 @@ describe('App', () => {
     await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
     expect(screen.getByText('Add Row')).toBeInTheDocument();
     expect(screen.queryByText('Save')).not.toBeInTheDocument();
+    expect(screen.queryByText('Cancel')).not.toBeInTheDocument();
     expect(bridge.invocations).toHaveLength(0);
     expect(view.submit).not.toHaveBeenCalled();
   });
