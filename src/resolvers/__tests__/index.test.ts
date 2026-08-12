@@ -36,13 +36,14 @@ describe('getTableData legacy migration reader', () => {
   it('returns null on a cold start', async () => {
     const result = await harness.invoke<TableData | null>('getTableData', {
       payload: { macroId: 'never-saved' },
+      payload: { macroId: 'macro-new' },
     });
     expect(result.data).toBeNull();
   });
 
   it('falls back to page-scoped data saved by an older release', async () => {
     await kvs.set('table:page-123:redshift-data-dictionary', {
-      rows: [{ ...rows[0], id: 'legacy-row', columnName: 'legacy_column' }],
+      rows: [makeRow({ id: 'legacy-row', columnName: 'legacy_column' })],
       updatedAt: '2025-01-01T00:00:00.000Z',
     });
 
@@ -56,6 +57,22 @@ describe('getTableData legacy migration reader', () => {
     expect(result.data.rows[0].columnName).toBe('legacy_column');
     expect(result.data.metadata).toEqual(getDefaultMetadata());
   });
+});
+
+// ── saveTableData resolver ──
+describe('saveTableData', () => {
+  it('saves valid rows and getTableData retrieves them', async () => {
+    const rows: TableRow[] = [
+      makeRow({ id: 'r1', columnName: 'name', dataType: 'String', length: '10', sampleValue: 'John' }),
+    ];
+
+    const saveResult = await harness.invoke<SaveTableDataResponse>('saveTableData', {
+      payload: { macroId: 'macro-1', metadata: defaultMetadata, rows },
+    });
+
+    expect(result.data).toBeNull();
+  });
+
   it('returns null when no storage key is available', async () => {
     const result = await harness.invoke<TableData | null>('getTableData', { payload: {} });
 

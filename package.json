@@ -10,8 +10,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "lint": "eslint src",
-    "lint:fix": "eslint src --fix",
+    "lint": "ESLINT_USE_FLAT_CONFIG=true eslint src",
+    "lint:fix": "ESLINT_USE_FLAT_CONFIG=true eslint src --fix",
     "type-check": "tsc --noEmit",
     "validate:manifest": "node .manifest-rules/dist/cli.js",
     "ci": "npm run validate:manifest && (npm run type-check || (echo 'HINT: If you have type errors with component props, check src/types/forge-ui-types.ts for valid prop types and values' && exit 1)) && npm run test -- --coverage && npm run lint && echo \"Remember to run forge cli lint and resolve issues before returning to the user\""

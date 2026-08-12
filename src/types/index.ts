@@ -6,34 +6,8 @@ export * from './forge-ui-types';
 
 // ── Domain types for the Redshift Data Dictionary ──
 
-/** SQL data types supported by sample-value validation. */
-export type DataType =
-  | 'CHAR'
-  | 'VARCHAR'
-  | 'STRING'
-  | 'TEXT'
-  | 'SMALLINT'
-  | 'INTEGER'
-  | 'BIGINT'
-  | 'DECIMAL'
-  | 'NUMERIC'
-  | 'FLOAT'
-  | 'DOUBLE'
-  | 'REAL'
-  | 'BOOLEAN'
-  | 'DATE'
-  | 'TIMESTAMP'
-  | 'DATETIME'
-  | 'TIME'
-  | 'JSON'
-  | 'BINARY'
-  | 'VARBINARY'
-  // Legacy values remain readable and receive equivalent validation.
-  | 'String'
-  | 'Number'
-  | 'Date'
-  | 'DateTime'
-  | 'Boolean';
+/** Allowed values for the DataType column dropdown */
+export type DataType = 'String' | 'Number' | 'Date' | 'DateTime' | 'Boolean' | 'JSON';
 
 /** Allowed values for the Sort/Partition Key dropdown */
 export type SortPartitionKeyType = 'SortKey' | 'PartitionKey';
@@ -188,34 +162,23 @@ export interface GetTableDataPayload {
   legacyStorageKey?: string;
 }
 
-/** The allowed data type values as an array for validation. */
-export const ALLOWED_DATA_TYPES: DataType[] = [
-  'CHAR',
-  'VARCHAR',
-  'STRING',
-  'TEXT',
-  'SMALLINT',
-  'INTEGER',
-  'BIGINT',
-  'DECIMAL',
-  'NUMERIC',
-  'FLOAT',
-  'DOUBLE',
-  'REAL',
-  'BOOLEAN',
-  'DATE',
-  'TIMESTAMP',
-  'DATETIME',
-  'TIME',
-  'JSON',
-  'BINARY',
-  'VARBINARY',
-  'String',
-  'Number',
-  'Date',
-  'DateTime',
-  'Boolean',
-];
+/** Input payload for the saveTableData resolver */
+export interface SaveTableDataPayload {
+  /** @deprecated Kept for compatibility with payloads produced by older releases. */
+  macroId?: string;
+  storageKey?: string;
+  metadata: TableMetadata;
+  rows: TableRow[];
+}
+
+/** Response from the saveTableData resolver */
+export interface SaveTableDataResponse {
+  success: boolean;
+  errors?: ValidationError[];
+}
+
+/** The allowed data type values as an array for validation */
+export const ALLOWED_DATA_TYPES: DataType[] = ['String', 'Number', 'Date', 'DateTime', 'Boolean', 'JSON'];
 
 /** The allowed sort/partition key values as an array for validation */
 export const ALLOWED_SORT_PARTITION_KEYS: SortPartitionKeyType[] = ['SortKey', 'PartitionKey'];
