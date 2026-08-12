@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import ForgeReconciler, {
   Text,
   Button,
@@ -13,13 +13,19 @@ import ForgeReconciler, {
   SectionMessage,
   Heading,
   xcss,
+  useConfig,
   useProductContext,
 } from '@forge/react';
-import { invoke } from '@forge/bridge';
+import { invoke, view } from '@forge/bridge';
 import { v4 as uuid } from 'uuid';
 import { setupGlobalErrorHandlers, logError, ErrorBoundary } from './utils/errorLogger';
-import type { TableRow, TableMetadata, ValidationError, ValidationField, TableData, SaveTableDataResponse } from '../types';
-import { getDefaultMetadata } from '../types';
+import type { TableRow, TableMetadata, ValidationError, ValidationField, TableData } from '../types';
+import {
+  getDefaultMetadata,
+  parseMacroTableData,
+  serializeMacroTableData,
+  TABLE_DATA_CONFIG_KEY,
+} from '../types';
 
 // Define allowed types locally to avoid pulling runtime values from the types barrel
 const ALLOWED_DATA_TYPES = ['String', 'Number', 'Date', 'DateTime', 'Boolean', 'JSON'] as const;
@@ -214,6 +220,10 @@ function validateRows(rows: TableRow[]): ValidationError[] {
       errors.push({ rowId: row.id, field: 'length', message: 'Length is required when DataType is "String"' });
     }
 
+    if (row.dataType === 'String' && Number(row.length) > 65535) {
+      errors.push({ rowId: row.id, field: 'length', message: 'String length cannot be greater than 65535' });
+    }
+
     // When length is provided, must be a positive integer
     if (row.length) {
       const parsed = Number(row.length);
@@ -238,9 +248,47 @@ function getFieldError(errors: ValidationError[], rowId: string, field: Validati
 // ── App Component ──
 
 export const App = (): JSX.Element => {
-  console.log("Starting App component");
+  console.log('Starting App component');
   const context = useProductContext();
+  const config = useConfig() as Record<string, unknown> | undefined;
   const preview = useMemo(() => isPreviewMode(), []);
+  const storageKey = useMemo(() => getStorageKey(context), [context]);
+  const isPageEditing = context?.extension?.isEditing ?? false;
+  const isConfiguring = context?.extension?.macro?.isConfiguring === true;
+  const canEdit = preview || isConfiguring;
+  const configValue = config?.[TABLE_DATA_CONFIG_KEY];
+  const hasConfigValue = typeof configValue === 'string' && configValue.length > 0;
+  const configuredTableData = useMemo(() => parseMacroTableData(configValue), [configValue]);
+
+  const [localRows, setRows] = useState<TableRow[]>(() => (
+    preview ? MOCK_ROWS : configuredTableData?.rows ?? []
+  ));
+  const [localMetadata, setMetadata] = useState<TableMetadata>(() => (
+    preview ? MOCK_METADATA : configuredTableData?.metadata ?? getDefaultMetadata()
+  ));
+  const [hasLocalEdits, setHasLocalEdits] = useState(false);
+  const [legacyLoadComplete, setLegacyLoadComplete] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [persistenceError, setPersistenceError] = useState<string | null>(null);
+  const rows = !hasLocalEdits && configuredTableData ? configuredTableData.rows : localRows;
+  const metadata = !hasLocalEdits && configuredTableData ? configuredTableData.metadata : localMetadata;
+  const validationErrors = useMemo(() => validateRows(rows), [rows]);
+  const configurationError = hasConfigValue && !configuredTableData
+    ? 'The saved table configuration is invalid. Edit the macro to repair it.'
+    : null;
+  const loading = !preview
+    && !configuredTableData
+    && !hasConfigValue
+    && Boolean(storageKey)
+    && !legacyLoadComplete;
+  const rowsRef = useRef(rows);
+  const metadataRef = useRef(metadata);
+  const submitQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(() => {
+    rowsRef.current = rows;
+    metadataRef.current = metadata;
+  }, [rows, metadata]);
   const storageIdentity = useMemo(() => getStorageIdentity(context), [context]);
   const { storageKey, legacyStorageKey } = storageIdentity;
   const isEditing = context?.extension?.isEditing ?? false;
@@ -257,8 +305,22 @@ export const App = (): JSX.Element => {
     setupGlobalErrorHandlers();
   }, []);
 
-  // Load data on mount (only in non-preview mode)
+  // Macro configuration is the source of truth. KVS is retained as a read-only
+  // fallback so existing macro instances transition without losing data.
   useEffect(() => {
+    if (preview || configuredTableData || hasConfigValue || !storageKey) {
+      return;
+    }
+
+    invoke<TableData | null>('getTableData', { storageKey, macroId: storageKey })
+      .then((data) => {
+        const nextRows = data?.rows ?? [];
+        const nextMetadata = data?.metadata ?? getDefaultMetadata();
+        rowsRef.current = nextRows;
+        metadataRef.current = nextMetadata;
+        setRows(nextRows);
+        setMetadata(nextMetadata);
+        setLegacyLoadComplete(true);
     if (preview || !storageKey) {
       return;
     }
@@ -278,6 +340,61 @@ export const App = (): JSX.Element => {
           message: 'Failed to load table data',
           stack: error?.stack || String(error),
         });
+        setLoadError('Failed to load the saved table data. Refresh the page to try again.');
+        setLegacyLoadComplete(true);
+      });
+  }, [configuredTableData, hasConfigValue, storageKey, preview]);
+
+  const persistPageDraft = useCallback((nextRows: TableRow[], nextMetadata: TableMetadata) => {
+    if (!isConfiguring || preview) {
+      return;
+    }
+
+    const serialized = serializeMacroTableData(nextMetadata, nextRows);
+    const submission = submitQueueRef.current
+      .catch(() => undefined)
+      .then(() => view.submit({
+        config: { [TABLE_DATA_CONFIG_KEY]: serialized },
+        keepEditing: true,
+      }));
+
+    submitQueueRef.current = submission;
+    void submission
+      .then(() => setPersistenceError(null))
+      .catch((error: unknown) => {
+        const err = error instanceof Error ? error : new Error(String(error));
+        console.error('Failed to update the Confluence page draft:', err);
+        logError({
+          message: 'Failed to update the Confluence page draft',
+          stack: err.stack || String(err),
+        });
+        setPersistenceError('Changes could not be added to the page draft. Try editing the field again.');
+      });
+  }, [isConfiguring, preview]);
+
+  useEffect(() => {
+    if (!isConfiguring || preview) {
+      return;
+    }
+
+    void view.onClose(async () => {
+      await submitQueueRef.current.catch(() => undefined);
+    });
+  }, [isConfiguring, preview]);
+
+  const replaceRows = useCallback((nextRows: TableRow[]) => {
+    rowsRef.current = nextRows;
+    setHasLocalEdits(true);
+    setRows(nextRows);
+    persistPageDraft(nextRows, metadataRef.current);
+  }, [persistPageDraft]);
+
+  const replaceMetadata = useCallback((nextMetadata: TableMetadata) => {
+    metadataRef.current = nextMetadata;
+    setHasLocalEdits(true);
+    setMetadata(nextMetadata);
+    persistPageDraft(rowsRef.current, nextMetadata);
+  }, [persistPageDraft]);
       })
       .finally(() => {
         if (!cancelled) {
@@ -292,127 +409,130 @@ export const App = (): JSX.Element => {
 
   const handleColumnNameChange = useCallback(
     (rowId: string, value: string) => {
-      setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, columnName: value } : r)));
-      setValidationErrors((prev) => prev.filter((e) => !(e.rowId === rowId && e.field === 'columnName')));
+      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, columnName: value } : row)));
     },
-    [],
+    [replaceRows],
   );
 
   const handleDataTypeChange = useCallback(
     (rowId: string, option: { label: string; value: string } | null) => {
-      setRows((prev) =>
-        prev.map((r) =>
-          r.id === rowId ? { ...r, dataType: (option?.value as TableRow['dataType']) ?? null } : r,
+      replaceRows(
+        rowsRef.current.map((row) =>
+          row.id === rowId ? { ...row, dataType: (option?.value as TableRow['dataType']) ?? null } : row,
         ),
       );
-      // Clear validation errors for dataType and length when type changes
-      setValidationErrors((prev) => prev.filter((e) => !(e.rowId === rowId && (e.field === 'dataType' || e.field === 'length'))));
     },
-    [],
+    [replaceRows],
   );
 
   const handleLengthChange = useCallback(
     (rowId: string, value: string) => {
-      setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, length: value } : r)));
-      setValidationErrors((prev) => prev.filter((e) => !(e.rowId === rowId && e.field === 'length')));
+      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, length: value } : row)));
     },
-    [],
+    [replaceRows],
   );
 
   const handleNullableChange = useCallback(
     (rowId: string, isChecked: boolean) => {
-      setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, nullable: isChecked } : r)));
+      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, nullable: isChecked } : row)));
     },
-    [],
+    [replaceRows],
   );
 
   const handleSortPartitionKeyChange = useCallback(
     (rowId: string, option: { label: string; value: string } | null) => {
-      setRows((prev) =>
-        prev.map((r) =>
-          r.id === rowId ? { ...r, sortPartitionKey: (option?.value as TableRow['sortPartitionKey']) ?? null } : r,
+      replaceRows(
+        rowsRef.current.map((row) =>
+          row.id === rowId
+            ? { ...row, sortPartitionKey: (option?.value as TableRow['sortPartitionKey']) ?? null }
+            : row,
         ),
       );
     },
-    [],
+    [replaceRows],
   );
 
   const handleCopyToRedshiftChange = useCallback(
     (rowId: string, isChecked: boolean) => {
-      setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, copyToRedshift: isChecked } : r)));
+      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, copyToRedshift: isChecked } : row)));
     },
-    [],
+    [replaceRows],
   );
 
   const handleSampleValueChange = useCallback(
     (rowId: string, value: string) => {
-      setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, sampleValue: value } : r)));
-      setValidationErrors((prev) => prev.filter((e) => !(e.rowId === rowId && e.field === 'sampleValue')));
+      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, sampleValue: value } : row)));
     },
-    [],
+    [replaceRows],
   );
 
   const handlePiiChange = useCallback(
     (rowId: string, isChecked: boolean) => {
-      setRows((prev) => prev.map((r) => (r.id === rowId ? { ...r, pii: isChecked } : r)));
+      replaceRows(rowsRef.current.map((row) => (row.id === rowId ? { ...row, pii: isChecked } : row)));
     },
-    [],
+    [replaceRows],
   );
 
   const handleServiceChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      setMetadata((prev) => ({ ...prev, service: e.target?.value ?? '' }));
+      replaceMetadata({ ...metadataRef.current, service: e.target?.value ?? '' });
     },
-    [],
+    [replaceMetadata],
   );
 
   const handleTableNameChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      setMetadata((prev) => ({ ...prev, tableName: e.target?.value ?? '' }));
+      replaceMetadata({ ...metadataRef.current, tableName: e.target?.value ?? '' });
     },
-    [],
+    [replaceMetadata],
   );
 
   const handleEnvironmentChange = useCallback(
     (option: { label: string; value: string } | null) => {
-      setMetadata((prev) => ({ ...prev, environment: (option?.value as TableMetadata['environment']) ?? null }));
+      replaceMetadata({
+        ...metadataRef.current,
+        environment: (option?.value as TableMetadata['environment']) ?? null,
+      });
     },
-    [],
+    [replaceMetadata],
   );
 
   const handleBusinessReasonChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      setMetadata((prev) => ({ ...prev, businessReason: e.target?.value ?? '' }));
+      replaceMetadata({ ...metadataRef.current, businessReason: e.target?.value ?? '' });
     },
-    [],
+    [replaceMetadata],
   );
 
   const handleLoadTypeChange = useCallback(
     (option: { label: string; value: string } | null) => {
-      setMetadata((prev) => ({ ...prev, loadType: (option?.value as TableMetadata['loadType']) ?? null }));
+      replaceMetadata({
+        ...metadataRef.current,
+        loadType: (option?.value as TableMetadata['loadType']) ?? null,
+      });
     },
-    [],
+    [replaceMetadata],
   );
 
   const handleContactNameEmailChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      setMetadata((prev) => ({ ...prev, contactNameEmail: e.target?.value ?? '' }));
+      replaceMetadata({ ...metadataRef.current, contactNameEmail: e.target?.value ?? '' });
     },
-    [],
+    [replaceMetadata],
   );
 
   const handleTeamNameEmailChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      setMetadata((prev) => ({ ...prev, teamNameEmail: e.target?.value ?? '' }));
+      replaceMetadata({ ...metadataRef.current, teamNameEmail: e.target?.value ?? '' });
     },
-    [],
+    [replaceMetadata],
   );
 
   const handleManagerNameEmailChange = useCallback(
     (e: { target?: { value?: string } }) => {
-      setMetadata((prev) => ({ ...prev, managerNameEmail: e.target?.value ?? '' }));
+      replaceMetadata({ ...metadataRef.current, managerNameEmail: e.target?.value ?? '' });
     },
-    [],
+    [replaceMetadata],
   );
 
   const handleAddRow = useCallback(() => {
@@ -427,10 +547,12 @@ export const App = (): JSX.Element => {
       sampleValue: '',
       pii: false,
     };
-    setRows((prev) => [...prev, newRow]);
-  }, []);
+    replaceRows([...rowsRef.current, newRow]);
+  }, [replaceRows]);
 
   const handleDeleteRow = useCallback((rowId: string) => {
+    replaceRows(rowsRef.current.filter((row) => row.id !== rowId));
+  }, [replaceRows]);
     setRows((prev) => prev.filter((r) => r.id !== rowId));
     setValidationErrors((prev) => prev.filter((e) => e.rowId !== rowId));
   }, []);
@@ -494,6 +616,30 @@ export const App = (): JSX.Element => {
   return (
     <Box xcss={containerStyles}>
       <Stack space="space.200">
+        {isConfiguring && (
+          <SectionMessage appearance="information">
+            <Text>Changes are added to the page draft automatically and are persisted when you save the Confluence page.</Text>
+          </SectionMessage>
+        )}
+        {preview && !isConfiguring && (
+          <SectionMessage appearance="information">
+            <Text>Preview mode uses editable sample data and does not persist changes.</Text>
+          </SectionMessage>
+        )}
+        {!preview && !isConfiguring && isPageEditing && (
+          <SectionMessage appearance="information">
+            <Text>Select this macro and choose Edit to change the table. The inline preview stays read-only.</Text>
+          </SectionMessage>
+        )}
+        {!preview && !isConfiguring && !isPageEditing && (
+          <Text color="color.text.subtle" size="small">View mode — read only</Text>
+        )}
+        {(configurationError || loadError || persistenceError) && (
+          <SectionMessage appearance="error">
+            <Text>{configurationError || loadError || persistenceError}</Text>
+          </SectionMessage>
+        )}
+
         {/* Metadata Header */}
         <Box xcss={metadataContainerStyles}>
           <Stack space="space.150">
@@ -501,11 +647,11 @@ export const App = (): JSX.Element => {
             <Inline space="space.200" spread="space-between">
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Service</Text>
-                <Textfield value={metadata.service} onChange={handleServiceChange} placeholder="e.g. user-service" isDisabled={!isEditing} />
+                <Textfield value={metadata.service} onChange={handleServiceChange} placeholder="e.g. user-service" isDisabled={!canEdit} />
               </Stack>
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Table Name</Text>
-                <Textfield value={metadata.tableName} onChange={handleTableNameChange} placeholder="e.g. users" isDisabled={!isEditing} />
+                <Textfield value={metadata.tableName} onChange={handleTableNameChange} placeholder="e.g. users" isDisabled={!canEdit} />
               </Stack>
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Environment</Text>
@@ -515,14 +661,14 @@ export const App = (): JSX.Element => {
                     onChange={handleEnvironmentChange}
                     placeholder="Select environment"
                     isClearable
-                    isDisabled={!isEditing}
+                    isDisabled={!canEdit}
                 />
               </Stack>
             </Inline>
             <Inline space="space.200" spread="space-between">
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Business Reason</Text>
-                <Textfield value={metadata.businessReason} onChange={handleBusinessReasonChange} placeholder="e.g. Stores user account data" isDisabled={!isEditing} />
+                <Textfield value={metadata.businessReason} onChange={handleBusinessReasonChange} placeholder="e.g. Stores user account data" isDisabled={!canEdit} />
               </Stack>
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Load Type</Text>
@@ -532,33 +678,26 @@ export const App = (): JSX.Element => {
                   onChange={handleLoadTypeChange}
                   placeholder="Select load type"
                   isClearable
-                  isDisabled={!isEditing}
+                  isDisabled={!canEdit}
                 />
               </Stack>
             </Inline>
             <Inline space="space.200" spread="space-between">
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Contact Name (Email)</Text>
-                <Textfield value={metadata.contactNameEmail} onChange={handleContactNameEmailChange} placeholder="e.g. Name and Email of the contact person responsible for this table" isDisabled={!isEditing} />
+                <Textfield value={metadata.contactNameEmail} onChange={handleContactNameEmailChange} placeholder="e.g. Name and Email of the contact person responsible for this table" isDisabled={!canEdit} />
               </Stack>
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Team Name (Email)</Text>
-                <Textfield value={metadata.teamNameEmail} onChange={handleTeamNameEmailChange} placeholder="e.g. Name and Email of the team responsible for this table" isDisabled={!isEditing} />
+                <Textfield value={metadata.teamNameEmail} onChange={handleTeamNameEmailChange} placeholder="e.g. Name and Email of the team responsible for this table" isDisabled={!canEdit} />
               </Stack>
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Manager Name (Email)</Text>
-                <Textfield value={metadata.managerNameEmail} onChange={handleManagerNameEmailChange} placeholder="e.g. Name and Email of the team Manager" isDisabled={!isEditing} />
+                <Textfield value={metadata.managerNameEmail} onChange={handleManagerNameEmailChange} placeholder="e.g. Name and Email of the team Manager" isDisabled={!canEdit} />
               </Stack>
             </Inline>
           </Stack>
         </Box>
-
-        {/* Save message */}
-        {saveMessage && (
-          <SectionMessage appearance={saveMessage.type === 'success' ? 'success' : 'error'}>
-            <Text>{saveMessage.text}</Text>
-          </SectionMessage>
-        )}
 
         {/* Table header */}
         <Box xcss={tableHeaderStyles}>
@@ -619,7 +758,7 @@ export const App = (): JSX.Element => {
                         value={row.columnName}
                         onChange={(e: { target?: { value?: string } }) => handleColumnNameChange(row.id, e.target?.value ?? '')}
                         placeholder="Required"
-                        isDisabled={!isEditing}
+                        isDisabled={!canEdit}
                       />
                     </Box>
                     {columnNameError && (
@@ -639,7 +778,7 @@ export const App = (): JSX.Element => {
                         value={row.dataType ? { label: row.dataType, value: row.dataType } : null}
                         onChange={(option: { label: string; value: string } | null) => handleDataTypeChange(row.id, option)}
                         placeholder="Select type"
-                        isDisabled={!isEditing}
+                        isDisabled={!canEdit}
                       />
                     </Box>
                     {dataTypeError && (
@@ -660,7 +799,7 @@ export const App = (): JSX.Element => {
                           value={row.length}
                           onChange={(e: { target?: { value?: string } }) => handleLengthChange(row.id, e.target?.value ?? '')}
                           placeholder={isLengthRequired ? 'Required' : 'Optional'}
-                          isDisabled={!isEditing}
+                          isDisabled={!canEdit}
                         />
                         {isLengthRequired && (
                           <Text color="color.text.danger" weight="bold">
@@ -683,7 +822,7 @@ export const App = (): JSX.Element => {
                     <Checkbox
                       isChecked={row.nullable}
                       onChange={(e) => handleNullableChange(row.id, e.target.checked ?? false)}
-                      isDisabled={!isEditing}
+                      isDisabled={!canEdit}
                     />
                   </Inline>
                 </Box>
@@ -696,7 +835,7 @@ export const App = (): JSX.Element => {
                     onChange={(option: { label: string; value: string } | null) => handleSortPartitionKeyChange(row.id, option)}
                     placeholder="Optional"
                     isClearable
-                    isDisabled={!isEditing}
+                    isDisabled={!canEdit}
                   />
                 </Box>
 
@@ -706,7 +845,7 @@ export const App = (): JSX.Element => {
                     <Checkbox
                       isChecked={row.copyToRedshift}
                       onChange={(e) => handleCopyToRedshiftChange(row.id, e.target.checked ?? false)}
-                      isDisabled={!isEditing}
+                      isDisabled={!canEdit}
                     />
                   </Inline>
                 </Box>
@@ -719,7 +858,7 @@ export const App = (): JSX.Element => {
                         value={row.sampleValue}
                         onChange={(e: { target?: { value?: string } }) => handleSampleValueChange(row.id, e.target?.value ?? '')}
                         placeholder="Required"
-                        isDisabled={!isEditing}
+                        isDisabled={!canEdit}
                       />
                     </Box>
                     {sampleValueError && (
@@ -736,15 +875,15 @@ export const App = (): JSX.Element => {
                     <Checkbox
                       isChecked={row.pii}
                       onChange={(e) => handlePiiChange(row.id, e.target.checked ?? false)}
-                      isDisabled={!isEditing}
+                      isDisabled={!canEdit}
                     />
                   </Inline>
                 </Box>
 
                 {/* Actions */}
                 <Box xcss={colActionsStyles}>
-                  <Button appearance="danger" onClick={() => handleDeleteRow(row.id)} isDisabled={!isEditing}>
-                    ✕
+                  <Button appearance="danger" onClick={() => handleDeleteRow(row.id)} isDisabled={!canEdit}>
+                    Delete
                   </Button>
                 </Box>
               </Inline>
@@ -755,21 +894,20 @@ export const App = (): JSX.Element => {
         {/* Empty state */}
         {rows.length === 0 && (
           <Box xcss={cellStyles}>
-            <Text color="color.text.subtle">No rows yet. Click &ldquo;Add Row&rdquo; to get started.</Text>
+            <Text color="color.text.subtle">
+              {canEdit ? 'No rows yet. Click “Add Row” to get started.' : 'No rows have been added.'}
+            </Text>
           </Box>
         )}
 
-        {/* Action buttons */}
-        <Box xcss={buttonRowStyles}>
-          <Inline space="space.100">
-            <Button appearance="default" onClick={handleAddRow} isDisabled={!isEditing}>
+        {/* Editing actions */}
+        {canEdit && (
+          <Box xcss={buttonRowStyles}>
+            <Button appearance="default" onClick={handleAddRow}>
               Add Row
             </Button>
-            <Button appearance="primary" onClick={handleSave} isDisabled={saving || !isEditing}>
-              {saving ? 'Saving...' : 'Save'}
-            </Button>
-          </Inline>
-        </Box>
+          </Box>
+        )}
       </Stack>
     </Box>
   );

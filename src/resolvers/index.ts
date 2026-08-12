@@ -1,14 +1,10 @@
 import Resolver from '@forge/resolver';
 import { kvs } from '@forge/kvs';
 import type {
-  TableRow,
   TableData,
-  ValidationError,
   GetTableDataPayload,
-  SaveTableDataPayload,
-  SaveTableDataResponse,
 } from '../types';
-import { ALLOWED_DATA_TYPES, getDefaultMetadata } from '../types';
+import { getDefaultMetadata } from '../types';
 
 // Basic type for Forge resolver request
 interface ResolverRequest {
@@ -37,71 +33,18 @@ function normalizeTableData(data: unknown): TableData {
   return record.metadata ? record : { ...record, metadata: getDefaultMetadata() };
 }
 
-/**
- * Validates rows before persisting to storage.
- * Returns an array of ValidationError objects (empty array means valid).
- */
-export function validateRows(rows: TableRow[]): ValidationError[] {
-  const errors: ValidationError[] = [];
-
-  for (const row of rows) {
-    // columnName must not be empty
-    if (!row.columnName || !row.columnName.trim()) {
-      errors.push({ rowId: row.id, field: 'columnName', message: 'Column Name is required' });
-    }
-
-    // dataType must not be null/empty
-    if (!row.dataType) {
-      errors.push({ rowId: row.id, field: 'dataType', message: 'DataType is required' });
-    } else if (!ALLOWED_DATA_TYPES.includes(row.dataType)) {
-      errors.push({ rowId: row.id, field: 'dataType', message: 'Invalid DataType value' });
-    }
-
-    // When dataType === 'String': length must be non-empty
-    if (row.dataType === 'String' && !row.length) {
-      errors.push({
-        rowId: row.id,
-        field: 'length',
-        message: 'Length is required when DataType is "String"',
-      });
-    }
-
-    // When dataType === 'String': length must be less than 65535
-    if (row.dataType === 'String' && parseInt(row.length) > 65535) {
-      errors.push({
-        rowId: row.id,
-        field: 'length',
-        message: 'String length cannot be greater than 65535',
-      });
-    }
-
-    // When length is provided (non-empty): must parse as a positive integer
-    if (row.length) {
-      const parsed = parseInt(row.length, 10);
-      if (isNaN(parsed) || parsed <= 0 || String(parsed) !== row.length) {
-        errors.push({
-          rowId: row.id,
-          field: 'length',
-          message: 'Length must be a positive integer',
-        });
-      }
-    }
-
-    // sampleValue must not be empty
-    if (!row.sampleValue || !row.sampleValue.trim()) {
-      errors.push({ rowId: row.id, field: 'sampleValue', message: 'Sample Value is required' });
-    }
-  }
-
-  return errors;
-}
-
 const resolver = new Resolver();
 
 // Retrieve table data for a macro instance
 resolver.define('getTableData', async (req: ResolverRequest) => {
   console.log("Starting resolver for getTableData");
   const payload = req.payload as GetTableDataPayload;
+  const storageKey = getStorageKey(payload);
+  if (!storageKey) {
+    console.log('[getTableData] No legacy storage key was provided');
+    return null;
+  }
+  const storageKeyName = `table:${storageKey}`;
   const storageKey = getRequestedStorageKey(payload);
   const legacyStorageKey = payload?.legacyStorageKey
     ?? (payload?.storageKey && payload.macroId !== payload.storageKey ? payload.macroId : undefined);

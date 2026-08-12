@@ -8,6 +8,11 @@ modules:
       title: Redshift Data Dictionary
       description: An interactive editable table macro for Confluence pages
       icon: resource:images;data-dictionary.png
+      config:
+        resource: main
+        render: native
+        viewportSize: max
+        openOnInsert: true
   function:
     - key: resolver
       handler: index.handler

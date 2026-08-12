@@ -86,6 +86,60 @@ export interface TableData {
   updatedAt: string;
 }
 
+/** Versioned payload stored in the Confluence macro configuration. */
+export interface MacroTableData {
+  version: 1;
+  metadata: TableMetadata;
+  rows: TableRow[];
+  updatedAt: string;
+}
+
+/** Macro configuration property containing the serialized table payload. */
+export const TABLE_DATA_CONFIG_KEY = 'tableData';
+
+/**
+ * Serializes table data into a single string because the payload contains
+ * arrays and nullable values that are not supported directly by macro config.
+ */
+export function serializeMacroTableData(metadata: TableMetadata, rows: TableRow[]): string {
+  const payload: MacroTableData = {
+    version: 1,
+    metadata,
+    rows,
+    updatedAt: new Date().toISOString(),
+  };
+
+  return JSON.stringify(payload);
+}
+
+/** Parses a versioned table payload from Confluence macro configuration. */
+export function parseMacroTableData(value: unknown): TableData | null {
+  if (typeof value !== 'string' || value.length === 0) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(value) as Partial<MacroTableData>;
+    if (
+      payload.version !== 1
+      || !payload.metadata
+      || typeof payload.metadata !== 'object'
+      || !Array.isArray(payload.rows)
+      || typeof payload.updatedAt !== 'string'
+    ) {
+      return null;
+    }
+
+    return {
+      metadata: payload.metadata as TableMetadata,
+      rows: payload.rows as TableRow[],
+      updatedAt: payload.updatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Field names that can have validation errors */
 export type ValidationField = 'columnName' | 'dataType' | 'length' | 'sampleValue';
 
