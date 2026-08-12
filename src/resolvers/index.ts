@@ -20,8 +20,21 @@ interface ResolverRequest {
   };
 }
 
-function getStorageKey(payload: { storageKey?: string; macroId?: string } | undefined): string | undefined {
-  return payload?.storageKey || payload?.macroId;
+function getStorageKeyName(storageKey: string | undefined): string {
+  if (!storageKey?.trim()) {
+    throw new Error('Macro storage key is unavailable');
+  }
+
+  return `table:${storageKey}`;
+}
+
+function getRequestedStorageKey(payload: { storageKey?: string; macroId?: string } | undefined): string | undefined {
+  return payload?.storageKey ?? payload?.macroId;
+}
+
+function normalizeTableData(data: unknown): TableData {
+  const record = data as TableData;
+  return record.metadata ? record : { ...record, metadata: getDefaultMetadata() };
 }
 
 /**
@@ -89,24 +102,21 @@ const resolver = new Resolver();
 resolver.define('getTableData', async (req: ResolverRequest) => {
   console.log("Starting resolver for getTableData");
   const payload = req.payload as GetTableDataPayload;
-  const storageKey = getStorageKey(payload);
-  const storageKeyName = `table:${storageKey}`;
+  const storageKey = getRequestedStorageKey(payload);
+  const legacyStorageKey = payload?.legacyStorageKey
+    ?? (payload?.storageKey && payload.macroId !== payload.storageKey ? payload.macroId : undefined);
+  const storageKeyName = getStorageKeyName(storageKey);
 
   try {
     const data = await kvs.get(storageKeyName);
-    if (!data && payload?.macroId && payload?.storageKey && payload.storageKey !== payload.macroId) {
-      const legacyData = await kvs.get(`table:${payload.macroId}`);
+    if (!data && legacyStorageKey && legacyStorageKey !== storageKey) {
+      const legacyData = await kvs.get(getStorageKeyName(legacyStorageKey));
       if (legacyData) {
-        return legacyData as TableData;
+        return normalizeTableData(legacyData);
       }
     }
     if (!data) return null;
-    // Backward compatibility: legacy records may not have a metadata field
-    const record = data as TableData;
-    if (!record.metadata) {
-      return { ...record, metadata: getDefaultMetadata() } as TableData;
-    }
-    return record;
+    return normalizeTableData(data);
   } catch (error) {
     console.error('[getTableData] Storage read failed', { storageKey, error });
     throw error;
@@ -123,8 +133,8 @@ resolver.define('saveTableData', async (req: ResolverRequest) => {
     return { success: false, errors } as SaveTableDataResponse;
   }
 
-  const storageKey = getStorageKey(payload);
-  const storageKeyName = `table:${storageKey}`;
+  const storageKey = getRequestedStorageKey(payload);
+  const storageKeyName = getStorageKeyName(storageKey);
   try {
     await kvs.set(storageKeyName, { metadata, rows, updatedAt: new Date().toISOString() });
     return { success: true } as SaveTableDataResponse;

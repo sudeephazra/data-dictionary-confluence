@@ -86,19 +86,19 @@ describe('Integration: Redshift Data Dictionary', () => {
 
     // Save to macro A
     const saveA = await harness.invoke<SaveTableDataResponse>('saveTableData', {
-      payload: { macroId: 'macro-a', metadata: metadataA, rows: rowsA },
+      payload: { storageKey: 'page-123:redshift-data-dictionary:macro-a', metadata: metadataA, rows: rowsA },
     });
     expect(saveA.data.success).toBe(true);
 
     // Save to macro B
     const saveB = await harness.invoke<SaveTableDataResponse>('saveTableData', {
-      payload: { macroId: 'macro-b', metadata: metadataB, rows: rowsB },
+      payload: { storageKey: 'page-123:redshift-data-dictionary:macro-b', metadata: metadataB, rows: rowsB },
     });
     expect(saveB.data.success).toBe(true);
 
     // Retrieve macro A — should only have its own data and metadata
     const getA = await harness.invoke<TableData>('getTableData', {
-      payload: { macroId: 'macro-a' },
+      payload: { storageKey: 'page-123:redshift-data-dictionary:macro-a' },
     });
     expect(getA.data.rows).toHaveLength(1);
     expect(getA.data.rows[0].id).toBe('a1');
@@ -107,7 +107,7 @@ describe('Integration: Redshift Data Dictionary', () => {
 
     // Retrieve macro B — should only have its own data and metadata
     const getB = await harness.invoke<TableData>('getTableData', {
-      payload: { macroId: 'macro-b' },
+      payload: { storageKey: 'page-123:redshift-data-dictionary:macro-b' },
     });
     expect(getB.data.rows).toHaveLength(2);
     expect(getB.data.rows[0].id).toBe('b1');

@@ -101,12 +101,16 @@ export interface ValidationError {
 
 /** Input payload for the getTableData resolver */
 export interface GetTableDataPayload {
+  /** @deprecated Kept for compatibility with payloads produced by older releases. */
   macroId?: string;
   storageKey?: string;
+  /** Page-scoped key used by releases that predate per-macro storage. */
+  legacyStorageKey?: string;
 }
 
 /** Input payload for the saveTableData resolver */
 export interface SaveTableDataPayload {
+  /** @deprecated Kept for compatibility with payloads produced by older releases. */
   macroId?: string;
   storageKey?: string;
   metadata: TableMetadata;
