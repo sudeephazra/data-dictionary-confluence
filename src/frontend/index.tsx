@@ -69,23 +69,31 @@ function isPreviewMode(): boolean {
   return typeof window !== 'undefined' && (window as unknown as Record<string, unknown>).__FORGE_PREVIEW__ === true;
 }
 
-function getStorageKey(context: unknown): string | undefined {
-  const extension = (context as { extension?: Record<string, unknown> } | undefined)?.extension;
+interface MacroStorageIdentity {
+  storageKey?: string;
+  legacyStorageKey?: string;
+}
+
+function getStorageIdentity(context: unknown): MacroStorageIdentity {
+  const productContext = context as {
+    extension?: Record<string, unknown>;
+    localId?: string;
+    moduleKey?: string;
+  } | undefined;
+  const extension = productContext?.extension;
   const content = extension?.content as { id?: string | number } | undefined;
   const contentId = content?.id ? String(content.id) : undefined;
-  const macro = extension?.macro as { id?: string; key?: string } | undefined;
-  const macroKey = macro?.key ?? 'redshift-data-dictionary';
-  const macroId = macro?.id ?? (extension?.id as string | undefined);
+  const moduleKey = productContext?.moduleKey ?? 'redshift-data-dictionary';
+  const localId = productContext?.localId;
 
-  if (contentId && macroId && macroKey) {
-    return `${contentId}:${macroKey}:${macroId}`;
+  if (!contentId || !localId) {
+    return {};
   }
 
-  if (contentId && macroKey) {
-    return `${contentId}:${macroKey}`;
-  }
-
-  return macroId;
+  return {
+    storageKey: `${contentId}:${moduleKey}:${localId}`,
+    legacyStorageKey: `${contentId}:${moduleKey}`,
+  };
 }
 
 // ── Styles ──
@@ -281,6 +289,16 @@ export const App = (): JSX.Element => {
     rowsRef.current = rows;
     metadataRef.current = metadata;
   }, [rows, metadata]);
+  const storageIdentity = useMemo(() => getStorageIdentity(context), [context]);
+  const { storageKey, legacyStorageKey } = storageIdentity;
+  const isEditing = context?.extension?.isEditing ?? false;
+
+  const [rows, setRows] = useState<TableRow[]>(() => (preview ? MOCK_ROWS : []));
+  const [metadata, setMetadata] = useState<TableMetadata>(() => preview ? MOCK_METADATA : getDefaultMetadata());
+  const [loadedStorageKey, setLoadedStorageKey] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
+  const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Set up global error handlers on app initialization
   useEffect(() => {
@@ -303,8 +321,20 @@ export const App = (): JSX.Element => {
         setRows(nextRows);
         setMetadata(nextMetadata);
         setLegacyLoadComplete(true);
+    if (preview || !storageKey) {
+      return;
+    }
+
+    let cancelled = false;
+
+    invoke<TableData>('getTableData', { storageKey, legacyStorageKey })
+      .then((data) => {
+        if (cancelled) return;
+        setRows(data?.rows ?? []);
+        setMetadata(data?.metadata ?? getDefaultMetadata());
       })
       .catch((error: Error) => {
+        if (cancelled) return;
         console.error('Failed to load table data:', error);
         logError({
           message: 'Failed to load table data',
@@ -365,6 +395,17 @@ export const App = (): JSX.Element => {
     setMetadata(nextMetadata);
     persistPageDraft(rowsRef.current, nextMetadata);
   }, [persistPageDraft]);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadedStorageKey(storageKey);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [storageKey, legacyStorageKey, preview]);
 
   const handleColumnNameChange = useCallback(
     (rowId: string, value: string) => {
@@ -512,6 +553,56 @@ export const App = (): JSX.Element => {
   const handleDeleteRow = useCallback((rowId: string) => {
     replaceRows(rowsRef.current.filter((row) => row.id !== rowId));
   }, [replaceRows]);
+    setRows((prev) => prev.filter((r) => r.id !== rowId));
+    setValidationErrors((prev) => prev.filter((e) => e.rowId !== rowId));
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    // Clear previous messages
+    setSaveMessage(null);
+
+    // Client-side validation
+    const errors = validateRows(rows);
+    setValidationErrors(errors);
+    if (errors.length > 0) {
+      return;
+    }
+
+    if (preview) {
+      setSaveMessage({ type: 'success', text: 'Table saved successfully (preview mode)' });
+      globalThis.setTimeout(() => setSaveMessage(null), 3000);
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const response = await invoke<SaveTableDataResponse>('saveTableData', { storageKey, metadata, rows });
+      if (response?.success) {
+        setSaveMessage({ type: 'success', text: 'Table saved successfully' });
+        globalThis.setTimeout(() => setSaveMessage(null), 3000);
+      } else {
+        const serverErrors = response?.errors;
+        if (serverErrors && serverErrors.length > 0) {
+          setValidationErrors(serverErrors);
+          setSaveMessage({ type: 'error', text: 'Validation failed. Please fix the errors below.' });
+        } else {
+          setSaveMessage({ type: 'error', text: 'Failed to save table data' });
+        }
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.error('Failed to save table data:', err);
+      logError({
+        message: 'Failed to save table data',
+        stack: err.stack || String(err),
+      });
+      setSaveMessage({ type: 'error', text: 'Failed to save table data' });
+    } finally {
+      setSaving(false);
+    }
+  }, [rows, metadata, storageKey, preview]);
+
+  const loading = !preview && (!context || Boolean(storageKey && loadedStorageKey !== storageKey));
 
   // Show spinner while loading
   if (loading) {
@@ -552,8 +643,7 @@ export const App = (): JSX.Element => {
         {/* Metadata Header */}
         <Box xcss={metadataContainerStyles}>
           <Stack space="space.150">
-            <Heading as="h4">Table Metadata*</Heading>
-            <Text color="color.text.accent.gray" size="small" weight="semibold" as="em">*Only one table available per page</Text>
+            <Heading as="h4">Table Metadata</Heading>
             <Inline space="space.200" spread="space-between">
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Service</Text>

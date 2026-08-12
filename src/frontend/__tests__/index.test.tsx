@@ -13,6 +13,10 @@ import {
 } from '../../types';
 
 const TEST_MACRO_ID = 'test-macro-id';
+const TEST_CONTENT_ID = 'page-123';
+const TEST_MODULE_KEY = 'redshift-data-dictionary';
+const TEST_STORAGE_KEY = `${TEST_CONTENT_ID}:${TEST_MODULE_KEY}:${TEST_MACRO_ID}`;
+const TEST_LEGACY_STORAGE_KEY = `${TEST_CONTENT_ID}:${TEST_MODULE_KEY}`;
 
 const validRow: TableRow = {
   id: 'row-1',
@@ -46,6 +50,8 @@ function setupContext(options: {
 
   bridge.setContext(
     createFrontendContext('confluence:macro', {
+      localId: TEST_MACRO_ID,
+      moduleKey: TEST_MODULE_KEY,
       extension: {
         isEditing: options.isEditing ?? false,
         macro: {
@@ -54,6 +60,8 @@ function setupContext(options: {
           isConfiguring: options.isConfiguring ?? false,
         },
         config,
+        content: { id: TEST_CONTENT_ID },
+        ...overrides,
       },
     }),
   );
@@ -93,6 +101,83 @@ describe('App', () => {
     const values = screen.getAllByTestId('forge-textfield').map((field) => field.getAttribute('value'));
     expect(values).toContain('user-service');
     expect(values).toContain('user_id');
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/No rows yet/i)).toBeInTheDocument();
+  });
+
+  it('loads data with a page- and macro-instance-scoped storage key', async () => {
+    setupContext();
+    mockGetTableData([]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(bridge.invocations).toContainEqual(
+        expect.objectContaining({
+          functionKey: 'getTableData',
+          payload: expect.objectContaining({
+            storageKey: TEST_STORAGE_KEY,
+            legacyStorageKey: TEST_LEGACY_STORAGE_KEY,
+          }),
+        }),
+      );
+    });
+  });
+
+  it('Add Row button adds a new empty row', async () => {
+    setupContext();
+    mockGetTableData([]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
+    });
+
+    // Find and click the Add Row button
+    const addButton = screen.getByText('Add Row');
+    await userEvent.click(addButton);
+
+    // Should now have Select elements rendered for the new row (DataType + Sort/Partition Key)
+    await waitFor(() => {
+      const selects = screen.getAllByTestId('forge-select');
+      expect(selects.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('Save button triggers validation and shows errors for empty columnName', async () => {
+    setupContext();
+    mockGetTableData([
+      { id: 'row-1', columnName: '', dataType: null, length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: '', pii: false },
+    ]);
+    mockSaveTableData();
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
+    });
+
+    // Click Save
+    const saveButton = screen.getByText('Save');
+    await userEvent.click(saveButton);
+
+    // Validation errors should appear
+    await waitFor(() => {
+      expect(screen.getByText('Column Name is required')).toBeInTheDocument();
+      expect(screen.getByText('DataType is required')).toBeInTheDocument();
+      expect(screen.getByText('Sample Value is required')).toBeInTheDocument();
+    });
+
+    // invoke('saveTableData') should NOT have been called
+    expect(
+      bridge.invocations.filter((inv) => inv.functionKey === 'saveTableData'),
+    ).toHaveLength(0);
   });
 
   it('falls back to existing KVS data when the macro has not migrated yet', async () => {
@@ -106,6 +191,23 @@ describe('App', () => {
         functionKey: 'getTableData',
         payload: expect.objectContaining({ macroId: TEST_MACRO_ID, storageKey: TEST_MACRO_ID }),
       }));
+      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
+    });
+
+    const saveButton = screen.getByText('Save');
+    await userEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(bridge.invocations).toContainEqual(
+        expect.objectContaining({
+          functionKey: 'saveTableData',
+          payload: expect.objectContaining({
+            storageKey: TEST_STORAGE_KEY,
+            metadata: getDefaultMetadata(),
+            rows: [validRow],
+          }),
+        }),
+      );
     });
     const values = screen.getAllByTestId('forge-textfield').map((field) => field.getAttribute('value'));
     expect(values).toContain('user_id');
@@ -226,6 +328,23 @@ describe('App', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/could not be added to the page draft/i)).toBeInTheDocument();
+      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
+    });
+
+    const saveButton = screen.getByText('Save');
+    await userEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(bridge.invocations).toContainEqual(
+        expect.objectContaining({
+          functionKey: 'saveTableData',
+          payload: expect.objectContaining({
+            storageKey: TEST_STORAGE_KEY,
+            metadata: customMetadata,
+            rows: [validRow],
+          }),
+        }),
+      );
     });
   });
 
