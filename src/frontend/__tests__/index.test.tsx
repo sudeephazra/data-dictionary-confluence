@@ -1,417 +1,244 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { bridge } from '@forge/bridge';
+import { bridge, view } from '@forge/bridge';
 import { createFrontendContext } from '@forge/testing-framework';
 import { App } from '../index';
-import type { TableRow, TableMetadata, TableData, SaveTableDataResponse } from '../../types';
-import { getDefaultMetadata } from '../../types';
+import type { TableData, TableMetadata, TableRow } from '../../types';
+import {
+  getDefaultMetadata,
+  parseMacroTableData,
+  serializeMacroTableData,
+  TABLE_DATA_CONFIG_KEY,
+} from '../../types';
 
 const TEST_MACRO_ID = 'test-macro-id';
 
-function setupContext(overrides?: Record<string, unknown>): void {
+const validRow: TableRow = {
+  id: 'row-1',
+  columnName: 'user_id',
+  dataType: 'String',
+  length: '255',
+  nullable: false,
+  sortPartitionKey: 'PartitionKey',
+  copyToRedshift: true,
+  sampleValue: 'abc-123',
+  pii: true,
+};
+
+const metadata: TableMetadata = {
+  ...getDefaultMetadata(),
+  service: 'user-service',
+  tableName: 'users',
+  environment: 'production',
+  businessReason: 'Stores user accounts',
+  loadType: 'Updatable',
+};
+
+function setupContext(options: {
+  isEditing?: boolean;
+  isConfiguring?: boolean;
+  configValue?: unknown;
+} = {}): void {
+  const config = options.configValue === undefined
+    ? {}
+    : { [TABLE_DATA_CONFIG_KEY]: options.configValue };
+
   bridge.setContext(
     createFrontendContext('confluence:macro', {
       extension: {
-        macro: { id: TEST_MACRO_ID },
-        ...overrides,
+        isEditing: options.isEditing ?? false,
+        macro: {
+          id: TEST_MACRO_ID,
+          key: 'redshift-data-dictionary',
+          isConfiguring: options.isConfiguring ?? false,
+        },
+        config,
       },
     }),
   );
 }
 
-function mockGetTableData(rows: TableRow[] = [], metadata: TableMetadata = getDefaultMetadata()): void {
-  const data: TableData = { metadata, rows, updatedAt: new Date().toISOString() };
+function mockLegacyData(rows: TableRow[] = [], tableMetadata: TableMetadata = getDefaultMetadata()): void {
+  const data: TableData = {
+    metadata: tableMetadata,
+    rows,
+    updatedAt: '2026-08-12T00:00:00.000Z',
+  };
   bridge.mockInvoke('getTableData', data);
 }
 
-function mockSaveTableData(response: SaveTableDataResponse = { success: true }): void {
-  bridge.mockInvoke('saveTableData', response);
+function configuredValue(rows: TableRow[] = [validRow], tableMetadata: TableMetadata = metadata): string {
+  return serializeMacroTableData(tableMetadata, rows);
 }
 
 describe('App', () => {
   beforeEach(() => {
     bridge.reset();
+    jest.restoreAllMocks();
+    jest.spyOn(view, 'onClose').mockResolvedValue(undefined);
+    jest.spyOn(view, 'submit').mockResolvedValue(undefined);
     delete (window as unknown as Record<string, unknown>).__FORGE_PREVIEW__;
   });
 
-  it('renders loading spinner initially then shows data after invoke resolves', async () => {
-    setupContext();
-    mockGetTableData([
-      { id: 'row-1', columnName: 'user_id', dataType: 'String', length: '100', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: 'test', pii: false },
-    ]);
+  it('loads page-owned macro configuration without reading legacy KVS', async () => {
+    setupContext({ configValue: configuredValue() });
 
     render(<App />);
 
-    // Spinner should be present initially
-    expect(screen.getByTestId('forge-spinner')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
+    expect(screen.getByText('View mode — read only')).toBeInTheDocument();
+    expect(bridge.invocations).toHaveLength(0);
 
-    // After data loads, spinner should be gone
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
+    const values = screen.getAllByTestId('forge-textfield').map((field) => field.getAttribute('value'));
+    expect(values).toContain('user-service');
+    expect(values).toContain('user_id');
   });
 
-  it('shows mock data in preview mode without calling invoke', async () => {
-    (window as unknown as Record<string, unknown>).__FORGE_PREVIEW__ = true;
+  it('falls back to existing KVS data when the macro has not migrated yet', async () => {
     setupContext();
+    mockLegacyData([validRow], metadata);
 
     render(<App />);
 
-    // In preview mode, no invoke calls should be made
     await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
+      expect(bridge.invocations).toContainEqual(expect.objectContaining({
+        functionKey: 'getTableData',
+        payload: expect.objectContaining({ macroId: TEST_MACRO_ID, storageKey: TEST_MACRO_ID }),
+      }));
     });
+    const values = screen.getAllByTestId('forge-textfield').map((field) => field.getAttribute('value'));
+    expect(values).toContain('user_id');
+  });
 
-    // Should not have called getTableData
+  it('shows a live error instead of silently replacing invalid configuration', async () => {
+    setupContext({ configValue: '{not-json' });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
+    expect(screen.getByText(/saved table configuration is invalid/i)).toBeInTheDocument();
     expect(bridge.invocations).toHaveLength(0);
   });
 
-  it('renders the table UI when macro context is unavailable', async () => {
-    bridge.setContext(createFrontendContext('confluence:macro', { extension: {} }));
+  it('keeps the inline macro read-only while the Confluence page is being edited', async () => {
+    setupContext({ isEditing: true, configValue: configuredValue() });
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    expect(screen.getByText(/No rows yet/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
+    expect(screen.getByText(/choose Edit to change the table/i)).toBeInTheDocument();
+    expect(screen.queryByText('Add Row')).not.toBeInTheDocument();
+    expect(screen.queryByText('Save')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('forge-textfield')[0]).toHaveAttribute('data-isdisabled', 'true');
   });
 
-  it('calls getTableData on mount with correct macroId', async () => {
-    setupContext();
-    mockGetTableData([]);
+  it('enables fields only inside the macro configuration editor', async () => {
+    setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(bridge.invocations).toContainEqual(
-        expect.objectContaining({
-          functionKey: 'getTableData',
-          payload: expect.objectContaining({
-            storageKey: TEST_MACRO_ID,
-            macroId: TEST_MACRO_ID,
-          }),
-        }),
-      );
-    });
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
+    expect(screen.getByText(/persisted when you save the Confluence page/i)).toBeInTheDocument();
+    expect(screen.getByText('Add Row')).toBeInTheDocument();
+    expect(screen.queryByText('Save')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('forge-textfield')[0]).toHaveAttribute('data-isdisabled', 'false');
+    expect(view.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('Add Row button adds a new empty row', async () => {
-    setupContext();
-    mockGetTableData([]);
+  it('submits metadata changes to the Confluence page draft', async () => {
+    setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
 
     render(<App />);
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
 
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
+    const serviceField = screen.getAllByTestId('forge-textfield')[0];
+    fireEvent.change(serviceField, { target: { value: 'billing-service' } });
 
-    // Find and click the Add Row button
-    const addButton = screen.getByText('Add Row');
-    await userEvent.click(addButton);
-
-    // Should now have Select elements rendered for the new row (DataType + Sort/Partition Key)
-    await waitFor(() => {
-      const selects = screen.getAllByTestId('forge-select');
-      expect(selects.length).toBeGreaterThanOrEqual(2);
-    });
-  });
-
-  it('Save button triggers validation and shows errors for empty columnName', async () => {
-    setupContext();
-    mockGetTableData([
-      { id: 'row-1', columnName: '', dataType: null, length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: '', pii: false },
-    ]);
-    mockSaveTableData();
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    // Click Save
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    // Validation errors should appear
-    await waitFor(() => {
-      expect(screen.getByText('Column Name is required')).toBeInTheDocument();
-      expect(screen.getByText('DataType is required')).toBeInTheDocument();
-      expect(screen.getByText('Sample Value is required')).toBeInTheDocument();
-    });
-
-    // invoke('saveTableData') should NOT have been called
-    expect(
-      bridge.invocations.filter((inv) => inv.functionKey === 'saveTableData'),
-    ).toHaveLength(0);
-  });
-
-  it('Save button calls saveTableData when validation passes', async () => {
-    setupContext();
-    const validRow: TableRow = { id: 'row-1', columnName: 'user_id', dataType: 'String', length: '255', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: 'test value', pii: false };
-    mockGetTableData([validRow]);
-    mockSaveTableData({ success: true });
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(bridge.invocations).toContainEqual(
-        expect.objectContaining({
-          functionKey: 'saveTableData',
-          payload: expect.objectContaining({
-            storageKey: TEST_MACRO_ID,
-            macroId: TEST_MACRO_ID,
-            metadata: getDefaultMetadata(),
-            rows: [validRow],
-          }),
-        }),
-      );
-    });
-  });
-
-  it('displays success message after successful save', async () => {
-    setupContext();
-    mockGetTableData([
-      { id: 'row-1', columnName: 'age', dataType: 'Number', length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: '25', pii: false },
-    ]);
-    mockSaveTableData({ success: true });
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(screen.getByText('Table saved successfully')).toBeInTheDocument();
-    });
-  });
-
-  it('displays error message when save fails', async () => {
-    setupContext();
-    mockGetTableData([
-      { id: 'row-1', columnName: 'is_active', dataType: 'Boolean', length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: 'true', pii: false },
-    ]);
-    mockSaveTableData({ success: false });
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(screen.getByText('Failed to save table data')).toBeInTheDocument();
-    });
-  });
-
-  it('Delete button removes a row', async () => {
-    setupContext();
-    mockGetTableData([
-      { id: 'row-1', columnName: 'user_id', dataType: 'String', length: '50', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: 'abc', pii: false },
-      { id: 'row-2', columnName: 'age', dataType: 'Number', length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: '25', pii: false },
-    ]);
-    mockSaveTableData();
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    // Should have 2 delete buttons (one per row)
-    const deleteButtons = screen.getAllByText('✕');
-    expect(deleteButtons).toHaveLength(2);
-
-    // Click the first delete button
-    await userEvent.click(deleteButtons[0]);
-
-    // Now should only have 1 delete button
-    await waitFor(() => {
-      expect(screen.getAllByText('✕')).toHaveLength(1);
-    });
-  });
-
-  it('validates length as positive integer when provided', async () => {
-    setupContext();
-    mockGetTableData([
-      { id: 'row-1', columnName: 'age', dataType: 'Number', length: '-5', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: '25', pii: false },
-    ]);
-    mockSaveTableData();
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(screen.getByText('Length must be a positive integer')).toBeInTheDocument();
-    });
-  });
-
-  it('validates length is required when dataType is String', async () => {
-    setupContext();
-    mockGetTableData([
-      { id: 'row-1', columnName: 'name', dataType: 'String', length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: 'John', pii: false },
-    ]);
-    mockSaveTableData();
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(screen.getByText(/Length is required when DataType is/)).toBeInTheDocument();
-    });
-  });
-
-  it('validates sampleValue is required', async () => {
-    setupContext();
-    mockGetTableData([
-      { id: 'row-1', columnName: 'age', dataType: 'Number', length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: '', pii: false },
-    ]);
-    mockSaveTableData();
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(screen.getByText('Sample Value is required')).toBeInTheDocument();
-    });
-  });
-
-  it('renders metadata header section with labels', async () => {
-    setupContext();
-    mockGetTableData([]);
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    expect(screen.getByText('Table Metadata')).toBeInTheDocument();
-    expect(screen.getByText('Service')).toBeInTheDocument();
-    expect(screen.getByText('Table Name')).toBeInTheDocument();
-    expect(screen.getByText('Environment')).toBeInTheDocument();
-    expect(screen.getByText('Business Reason')).toBeInTheDocument();
-    expect(screen.getByText('Load Type')).toBeInTheDocument();
-  });
-
-  it('renders metadata fields from loaded data', async () => {
-    setupContext();
-    const customMetadata: TableMetadata = {
-      service: 'order-service',
-      tableName: 'orders',
-      environment: 'staging',
-      businessReason: 'Tracks customer orders',
-      loadType: 'Updatable',
+    await waitFor(() => expect(view.submit).toHaveBeenCalled());
+    const payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as {
+      config: Record<string, string>;
+      keepEditing: boolean;
     };
-    mockGetTableData([], customMetadata);
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    await waitFor(() => {
-      const textfields = screen.getAllByTestId('forge-textfield');
-      const values = textfields.map((el) => el.getAttribute('value'));
-      expect(values).toContain('order-service');
-      expect(values).toContain('orders');
-      expect(values).toContain('Tracks customer orders');
-    });
-
-    const selects = screen.getAllByTestId('forge-select');
-    expect(selects.some((select) => select.getAttribute('data-options')?.includes('staging'))).toBe(true);
+    const submitted = parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY]);
+    expect(payload.keepEditing).toBe(true);
+    expect(submitted?.metadata.service).toBe('billing-service');
+    expect(submitted?.rows).toEqual([validRow]);
+    expect(bridge.invocations.filter((call) => call.functionKey === 'saveTableData')).toHaveLength(0);
   });
 
-  it('includes metadata in save payload', async () => {
-    setupContext();
-    const customMetadata: TableMetadata = {
-      service: 'payment-service',
-      tableName: 'payments',
-      environment: 'production',
-      businessReason: 'Payment records',
-      loadType: 'Insert only',
+  it('adds and removes rows through page-draft submissions', async () => {
+    setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
+
+    render(<App />);
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
+
+    await userEvent.click(screen.getByText('Add Row'));
+    await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(1));
+
+    let payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as { config: Record<string, string> };
+    expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.rows).toHaveLength(2);
+
+    await userEvent.click(screen.getAllByText('Delete')[0]);
+    await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(2));
+    payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as { config: Record<string, string> };
+    expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.rows).toHaveLength(1);
+  });
+
+  it('shows validation feedback immediately without blocking the page draft', async () => {
+    const invalidRow: TableRow = {
+      ...validRow,
+      columnName: '',
+      dataType: null,
+      length: '',
+      sampleValue: '',
     };
-    const validRow: TableRow = { id: 'row-1', columnName: 'amount', dataType: 'Number', length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: '100', pii: false };
-    mockGetTableData([validRow], customMetadata);
-    mockSaveTableData({ success: true });
+    setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue([invalidRow]) });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText('Column Name is required')).toBeInTheDocument());
+    expect(screen.getByText('DataType is required')).toBeInTheDocument();
+    expect(screen.getByText('Sample Value is required')).toBeInTheDocument();
+  });
+
+  it('retains the Redshift string-length validation in the page editor', async () => {
+    setupContext({
+      isEditing: true,
+      isConfiguring: true,
+      configValue: configuredValue([{ ...validRow, length: '65536' }]),
+    });
 
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(bridge.invocations).toContainEqual(
-        expect.objectContaining({
-          functionKey: 'saveTableData',
-          payload: expect.objectContaining({
-            storageKey: TEST_MACRO_ID,
-            macroId: TEST_MACRO_ID,
-            metadata: customMetadata,
-            rows: [validRow],
-          }),
-        }),
-      );
+      expect(screen.getByText('String length cannot be greater than 65535')).toBeInTheDocument();
     });
   });
 
-  it('shows mock metadata in preview mode', async () => {
+  it('displays page-draft submission failures to the user', async () => {
+    (view.submit as jest.Mock).mockRejectedValueOnce(new Error('bridge unavailable'));
+    setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
+
+    render(<App />);
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
+    fireEvent.change(screen.getAllByTestId('forge-textfield')[0], { target: { value: 'failed-change' } });
+
+    await waitFor(() => {
+      expect(screen.getByText(/could not be added to the page draft/i)).toBeInTheDocument();
+    });
+  });
+
+  it('shows editable mock data in preview mode without bridge calls', async () => {
     (window as unknown as Record<string, unknown>).__FORGE_PREVIEW__ = true;
     setupContext();
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const textfields = screen.getAllByTestId('forge-textfield');
-    const values = textfields.map((el) => el.getAttribute('value'));
-    expect(values).toContain('user-service');
-    expect(values).toContain('users');
-    expect(values).toContain('Stores user account data');
-
-    const selects = screen.getAllByTestId('forge-select');
-    expect(selects.some((select) => select.getAttribute('data-options')?.includes('production'))).toBe(true);
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
+    expect(screen.getByText('Add Row')).toBeInTheDocument();
+    expect(screen.queryByText('Save')).not.toBeInTheDocument();
+    expect(bridge.invocations).toHaveLength(0);
+    expect(view.submit).not.toHaveBeenCalled();
   });
 });
