@@ -63,23 +63,31 @@ function isPreviewMode(): boolean {
   return typeof window !== 'undefined' && (window as unknown as Record<string, unknown>).__FORGE_PREVIEW__ === true;
 }
 
-function getStorageKey(context: unknown): string | undefined {
-  const extension = (context as { extension?: Record<string, unknown> } | undefined)?.extension;
+interface MacroStorageIdentity {
+  storageKey?: string;
+  legacyStorageKey?: string;
+}
+
+function getStorageIdentity(context: unknown): MacroStorageIdentity {
+  const productContext = context as {
+    extension?: Record<string, unknown>;
+    localId?: string;
+    moduleKey?: string;
+  } | undefined;
+  const extension = productContext?.extension;
   const content = extension?.content as { id?: string | number } | undefined;
   const contentId = content?.id ? String(content.id) : undefined;
-  const macro = extension?.macro as { id?: string; key?: string } | undefined;
-  const macroKey = macro?.key ?? 'redshift-data-dictionary';
-  const macroId = macro?.id ?? (extension?.id as string | undefined);
+  const moduleKey = productContext?.moduleKey ?? 'redshift-data-dictionary';
+  const localId = productContext?.localId;
 
-  if (contentId && macroId && macroKey) {
-    return `${contentId}:${macroKey}:${macroId}`;
+  if (!contentId || !localId) {
+    return {};
   }
 
-  if (contentId && macroKey) {
-    return `${contentId}:${macroKey}`;
-  }
-
-  return macroId;
+  return {
+    storageKey: `${contentId}:${moduleKey}:${localId}`,
+    legacyStorageKey: `${contentId}:${moduleKey}`,
+  };
 }
 
 // ── Styles ──
@@ -233,12 +241,13 @@ export const App = (): JSX.Element => {
   console.log("Starting App component");
   const context = useProductContext();
   const preview = useMemo(() => isPreviewMode(), []);
-  const storageKey = useMemo(() => getStorageKey(context), [context]);
+  const storageIdentity = useMemo(() => getStorageIdentity(context), [context]);
+  const { storageKey, legacyStorageKey } = storageIdentity;
   const isEditing = context?.extension?.isEditing ?? false;
 
   const [rows, setRows] = useState<TableRow[]>(() => (preview ? MOCK_ROWS : []));
   const [metadata, setMetadata] = useState<TableMetadata>(() => preview ? MOCK_METADATA : getDefaultMetadata());
-  const [loading, setLoading] = useState(() => !preview);
+  const [loadedStorageKey, setLoadedStorageKey] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -250,35 +259,36 @@ export const App = (): JSX.Element => {
 
   // Load data on mount (only in non-preview mode)
   useEffect(() => {
-    if (preview) {
-      setLoading(false);
+    if (preview || !storageKey) {
       return;
     }
 
-    if (!storageKey) {
-      setLoading(false);
-      setRows([]);
-      setMetadata(getDefaultMetadata());
-      return;
-    }
+    let cancelled = false;
 
-    setLoading(true);
-
-    invoke<TableData>('getTableData', { storageKey, macroId: storageKey })
+    invoke<TableData>('getTableData', { storageKey, legacyStorageKey })
       .then((data) => {
+        if (cancelled) return;
         setRows(data?.rows ?? []);
         setMetadata(data?.metadata ?? getDefaultMetadata());
-        setLoading(false);
       })
       .catch((error: Error) => {
+        if (cancelled) return;
         console.error('Failed to load table data:', error);
         logError({
           message: 'Failed to load table data',
           stack: error?.stack || String(error),
         });
-        setLoading(false);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadedStorageKey(storageKey);
+        }
       });
-  }, [storageKey, preview]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [storageKey, legacyStorageKey, preview]);
 
   const handleColumnNameChange = useCallback(
     (rowId: string, value: string) => {
@@ -444,7 +454,7 @@ export const App = (): JSX.Element => {
 
     setSaving(true);
     try {
-      const response = await invoke<SaveTableDataResponse>('saveTableData', { storageKey, macroId: storageKey, metadata, rows });
+      const response = await invoke<SaveTableDataResponse>('saveTableData', { storageKey, metadata, rows });
       if (response?.success) {
         setSaveMessage({ type: 'success', text: 'Table saved successfully' });
         globalThis.setTimeout(() => setSaveMessage(null), 3000);
@@ -470,6 +480,8 @@ export const App = (): JSX.Element => {
     }
   }, [rows, metadata, storageKey, preview]);
 
+  const loading = !preview && (!context || Boolean(storageKey && loadedStorageKey !== storageKey));
+
   // Show spinner while loading
   if (loading) {
     return (
@@ -485,8 +497,7 @@ export const App = (): JSX.Element => {
         {/* Metadata Header */}
         <Box xcss={metadataContainerStyles}>
           <Stack space="space.150">
-            <Heading as="h4">Table Metadata*</Heading>
-            <Text color="color.text.accent.gray" size="small" weight="semibold" as="em">*Only one table available per page</Text>
+            <Heading as="h4">Table Metadata</Heading>
             <Inline space="space.200" spread="space-between">
               <Stack space="space.050" grow="fill">
                 <Text weight="bold" size="small">Service</Text>

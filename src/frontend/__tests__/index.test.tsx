@@ -8,12 +8,18 @@ import type { TableRow, TableMetadata, TableData, SaveTableDataResponse } from '
 import { getDefaultMetadata } from '../../types';
 
 const TEST_MACRO_ID = 'test-macro-id';
+const TEST_CONTENT_ID = 'page-123';
+const TEST_MODULE_KEY = 'redshift-data-dictionary';
+const TEST_STORAGE_KEY = `${TEST_CONTENT_ID}:${TEST_MODULE_KEY}:${TEST_MACRO_ID}`;
+const TEST_LEGACY_STORAGE_KEY = `${TEST_CONTENT_ID}:${TEST_MODULE_KEY}`;
 
 function setupContext(overrides?: Record<string, unknown>): void {
   bridge.setContext(
     createFrontendContext('confluence:macro', {
+      localId: TEST_MACRO_ID,
+      moduleKey: TEST_MODULE_KEY,
       extension: {
-        macro: { id: TEST_MACRO_ID },
+        content: { id: TEST_CONTENT_ID },
         ...overrides,
       },
     }),
@@ -79,7 +85,7 @@ describe('App', () => {
     expect(screen.getByText(/No rows yet/i)).toBeInTheDocument();
   });
 
-  it('calls getTableData on mount with correct macroId', async () => {
+  it('loads data with a page- and macro-instance-scoped storage key', async () => {
     setupContext();
     mockGetTableData([]);
 
@@ -90,8 +96,8 @@ describe('App', () => {
         expect.objectContaining({
           functionKey: 'getTableData',
           payload: expect.objectContaining({
-            storageKey: TEST_MACRO_ID,
-            macroId: TEST_MACRO_ID,
+            storageKey: TEST_STORAGE_KEY,
+            legacyStorageKey: TEST_LEGACY_STORAGE_KEY,
           }),
         }),
       );
@@ -169,8 +175,7 @@ describe('App', () => {
         expect.objectContaining({
           functionKey: 'saveTableData',
           payload: expect.objectContaining({
-            storageKey: TEST_MACRO_ID,
-            macroId: TEST_MACRO_ID,
+            storageKey: TEST_STORAGE_KEY,
             metadata: getDefaultMetadata(),
             rows: [validRow],
           }),
@@ -385,8 +390,7 @@ describe('App', () => {
         expect.objectContaining({
           functionKey: 'saveTableData',
           payload: expect.objectContaining({
-            storageKey: TEST_MACRO_ID,
-            macroId: TEST_MACRO_ID,
+            storageKey: TEST_STORAGE_KEY,
             metadata: customMetadata,
             rows: [validRow],
           }),

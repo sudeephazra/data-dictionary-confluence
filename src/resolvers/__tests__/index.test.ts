@@ -39,6 +39,23 @@ describe('getTableData', () => {
     });
     expect(result.data).toBeNull();
   });
+
+  it('falls back to page-scoped data saved by an older release', async () => {
+    await kvs.set('table:page-123:redshift-data-dictionary', {
+      rows: [makeRow({ id: 'legacy-row', columnName: 'legacy_column' })],
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    });
+
+    const result = await harness.invoke<TableData>('getTableData', {
+      payload: {
+        storageKey: 'page-123:redshift-data-dictionary:macro-1',
+        legacyStorageKey: 'page-123:redshift-data-dictionary',
+      },
+    });
+
+    expect(result.data.rows[0].columnName).toBe('legacy_column');
+    expect(result.data.metadata).toEqual(getDefaultMetadata());
+  });
 });
 
 // ── saveTableData resolver ──
