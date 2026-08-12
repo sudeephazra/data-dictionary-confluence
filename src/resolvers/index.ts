@@ -3,8 +3,12 @@ import { kvs } from '@forge/kvs';
 import type {
   TableData,
   GetTableDataPayload,
+  SaveTableDataPayload,
+  SaveTableDataResponse,
 } from '../types';
 import { getDefaultMetadata } from '../types';
+import { validateRows } from '../validation';
+export { validateRows } from '../validation';
 
 // Basic type for Forge resolver request
 interface ResolverRequest {
@@ -39,12 +43,6 @@ const resolver = new Resolver();
 resolver.define('getTableData', async (req: ResolverRequest) => {
   console.log("Starting resolver for getTableData");
   const payload = req.payload as GetTableDataPayload;
-  const storageKey = getStorageKey(payload);
-  if (!storageKey) {
-    console.log('[getTableData] No legacy storage key was provided');
-    return null;
-  }
-  const storageKeyName = `table:${storageKey}`;
   const storageKey = getRequestedStorageKey(payload);
   const legacyStorageKey = payload?.legacyStorageKey
     ?? (payload?.storageKey && payload.macroId !== payload.storageKey ? payload.macroId : undefined);

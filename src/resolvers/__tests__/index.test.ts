@@ -1,7 +1,7 @@
 import { createTestHarness } from '@forge/testing-framework';
 import { kvs } from '@forge/kvs';
-import { handler } from '../index';
-import type { TableData, TableMetadata, TableRow } from '../../types';
+import { handler, validateRows } from '../index';
+import type { SaveTableDataResponse, TableData, TableRow } from '../../types';
 import { getDefaultMetadata } from '../../types';
 
 const harness = createTestHarness({
@@ -9,35 +9,32 @@ const harness = createTestHarness({
   handlers: { resolver: handler },
 });
 
-const metadata: TableMetadata = {
-  ...getDefaultMetadata(),
-  service: 'legacy-service',
-  tableName: 'legacy-table',
-};
-
-const rows: TableRow[] = [{
-  id: 'row-1',
-  columnName: 'user_id',
-  dataType: 'String',
-  length: '255',
-  nullable: false,
-  sortPartitionKey: 'PartitionKey',
-  copyToRedshift: true,
-  sampleValue: 'abc-123',
-  pii: true,
-}];
+function makeRow(overrides: Partial<TableRow> = {}): TableRow {
+  return {
+    id: 'row-1',
+    columnName: 'user_id',
+    dataType: 'String',
+    length: '255',
+    nullable: false,
+    sortPartitionKey: 'PartitionKey',
+    copyToRedshift: true,
+    sampleValue: 'abc-123',
+    pii: true,
+    ...overrides,
+  };
+}
 
 beforeEach(() => {
   harness.reset();
   jest.restoreAllMocks();
 });
 
-describe('getTableData legacy migration reader', () => {
+describe('getTableData', () => {
   it('returns null on a cold start', async () => {
     const result = await harness.invoke<TableData | null>('getTableData', {
       payload: { macroId: 'never-saved' },
-      payload: { macroId: 'macro-new' },
     });
+
     expect(result.data).toBeNull();
   });
 
@@ -57,74 +54,78 @@ describe('getTableData legacy migration reader', () => {
     expect(result.data.rows[0].columnName).toBe('legacy_column');
     expect(result.data.metadata).toEqual(getDefaultMetadata());
   });
-});
 
-// ── saveTableData resolver ──
-describe('saveTableData', () => {
-  it('saves valid rows and getTableData retrieves them', async () => {
-    const rows: TableRow[] = [
-      makeRow({ id: 'r1', columnName: 'name', dataType: 'String', length: '10', sampleValue: 'John' }),
-    ];
-
-    const saveResult = await harness.invoke<SaveTableDataResponse>('saveTableData', {
-      payload: { macroId: 'macro-1', metadata: defaultMetadata, rows },
-    });
-
-    expect(result.data).toBeNull();
-  });
-
-  it('returns null when no storage key is available', async () => {
-    const result = await harness.invoke<TableData | null>('getTableData', { payload: {} });
-
-    expect(result.data).toBeNull();
-  });
-
-  it('reads an existing page-scoped KVS record without changing it', async () => {
-    const stored: TableData = {
-      metadata,
-      rows,
-      updatedAt: '2026-07-15T00:00:00.000Z',
-    };
-    await kvs.set('table:page-123:redshift-data-dictionary', stored);
-
-    const result = await harness.invoke<TableData>('getTableData', {
-      payload: { storageKey: 'page-123:redshift-data-dictionary' },
-    });
-
-    expect(result.data).toEqual(stored);
-    expect(await kvs.get('table:page-123:redshift-data-dictionary')).toEqual(stored);
-  });
-
-  it('falls back to the old macro ID when the page-scoped key has no data', async () => {
-    const stored: TableData = {
-      metadata,
-      rows,
-      updatedAt: '2026-07-15T00:00:00.000Z',
-    };
-    await kvs.set('table:legacy-macro-id', stored);
-
-    const result = await harness.invoke<TableData>('getTableData', {
-      payload: {
-        storageKey: 'page-123:redshift-data-dictionary:new-id',
-        macroId: 'legacy-macro-id',
-      },
-    });
-
-    expect(result.data).toEqual(stored);
-  });
-
-  it('backfills metadata for records created before metadata was introduced', async () => {
-    await kvs.set('table:legacy-without-metadata', {
-      rows,
+  it('normalizes records created before metadata was introduced', async () => {
+    await kvs.set('table:legacy-macro', {
+      rows: [makeRow()],
       updatedAt: '2025-01-01T00:00:00.000Z',
     });
 
     const result = await harness.invoke<TableData>('getTableData', {
-      payload: { macroId: 'legacy-without-metadata' },
+      payload: { macroId: 'legacy-macro' },
     });
 
-    expect(result.data.rows).toEqual(rows);
+    expect(result.data.rows).toEqual([makeRow()]);
     expect(result.data.metadata).toEqual(getDefaultMetadata());
+  });
+});
+
+describe('saveTableData', () => {
+  it('saves valid rows under the requested macro-instance key', async () => {
+    const rows = [makeRow()];
+    const storageKey = 'page-123:redshift-data-dictionary:macro-1';
+
+    const saved = await harness.invoke<SaveTableDataResponse>('saveTableData', {
+      payload: { storageKey, metadata: getDefaultMetadata(), rows },
+    });
+    const loaded = await harness.invoke<TableData>('getTableData', {
+      payload: { storageKey },
+    });
+
+    expect(saved.data).toEqual({ success: true });
+    expect(loaded.data.rows).toEqual(rows);
+    expect(loaded.data.metadata).toEqual(getDefaultMetadata());
+    expect(loaded.data.updatedAt).toEqual(expect.any(String));
+  });
+
+  it('returns useful validation errors and does not persist invalid rows', async () => {
+    const invalidRow = makeRow({ columnName: '', dataType: null, length: '', sampleValue: '' });
+    const storageKey = 'page-123:redshift-data-dictionary:invalid';
+
+    const result = await harness.invoke<SaveTableDataResponse>('saveTableData', {
+      payload: { storageKey, metadata: getDefaultMetadata(), rows: [invalidRow] },
+    });
+
+    expect(result.data.success).toBe(false);
+    expect(result.data.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'columnName' }),
+      expect.objectContaining({ field: 'dataType' }),
+      expect.objectContaining({ field: 'sampleValue' }),
+    ]));
+    expect(await kvs.get(`table:${storageKey}`)).toBeUndefined();
+  });
+});
+
+describe('validateRows', () => {
+  it('enforces Redshift string length and positive-integer rules', () => {
+    expect(validateRows([makeRow({ length: '65536' })])).toContainEqual(
+      expect.objectContaining({ field: 'length', message: 'String length cannot be greater than 65535' }),
+    );
+    expect(validateRows([makeRow({ dataType: 'Number', length: '3.5' })])).toContainEqual(
+      expect.objectContaining({ field: 'length', message: 'Length must be a positive integer' }),
+    );
+  });
+
+  it('enforces the declared String length for sample values', () => {
+    expect(validateRows([makeRow({ length: '10', sampleValue: '12345678901' })])).toContainEqual(
+      expect.objectContaining({
+        field: 'sampleValue',
+        message: 'Sample value exceeds the maximum length of 10 characters.',
+      }),
+    );
+    expect(validateRows([makeRow({ length: '10', sampleValue: '1234567890' })])).not.toContainEqual(
+      expect.objectContaining({ field: 'sampleValue' }),
+    );
   });
 });
 
