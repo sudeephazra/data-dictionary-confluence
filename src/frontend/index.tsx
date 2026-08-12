@@ -26,10 +26,16 @@ import {
   serializeMacroTableData,
   TABLE_DATA_CONFIG_KEY,
 } from '../types';
+import { validateRows } from '../validation';
 
-// Define allowed types locally to avoid pulling runtime values from the types barrel
-const ALLOWED_DATA_TYPES = ['String', 'Number', 'Date', 'DateTime', 'Boolean', 'JSON'] as const;
-const DATA_TYPE_OPTIONS = ALLOWED_DATA_TYPES.map((t) => ({ label: t, value: t }));
+const DATA_TYPE_OPTIONS = [
+  'CHAR', 'VARCHAR', 'STRING', 'TEXT',
+  'SMALLINT', 'INTEGER', 'BIGINT',
+  'DECIMAL', 'NUMERIC',
+  'FLOAT', 'DOUBLE', 'REAL',
+  'BOOLEAN', 'DATE', 'TIMESTAMP', 'DATETIME', 'TIME', 'JSON',
+  'BINARY', 'VARBINARY',
+].map((dataType) => ({ label: dataType, value: dataType }));
 const SORT_PARTITION_KEY_OPTIONS = [
   { label: 'SortKey', value: 'SortKey' },
   { label: 'PartitionKey', value: 'PartitionKey' },
@@ -60,9 +66,9 @@ const MOCK_METADATA: TableMetadata = {
 };
 
 const MOCK_ROWS: TableRow[] = [
-  { id: 'mock-1', columnName: 'user_id', dataType: 'String', length: '255', nullable: false, sortPartitionKey: 'PartitionKey', copyToRedshift: true, sampleValue: 'abc123', pii: true },
-  { id: 'mock-2', columnName: 'age', dataType: 'Number', length: '', nullable: true, sortPartitionKey: null, copyToRedshift: true, sampleValue: '25', pii: false },
-  { id: 'mock-3', columnName: 'is_active', dataType: 'Boolean', length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: 'true', pii: false },
+  { id: 'mock-1', columnName: 'user_id', dataType: 'VARCHAR', length: '255', nullable: false, sortPartitionKey: 'PartitionKey', copyToRedshift: true, sampleValue: 'abc123', pii: true },
+  { id: 'mock-2', columnName: 'age', dataType: 'INTEGER', length: '', nullable: true, sortPartitionKey: null, copyToRedshift: true, sampleValue: '25', pii: false },
+  { id: 'mock-3', columnName: 'is_active', dataType: 'BOOLEAN', length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: 'true', pii: false },
 ];
 
 function isPreviewMode(): boolean {
@@ -199,48 +205,6 @@ const colActionsStyles = xcss({
 
 // ── Validation ──
 
-function validateRows(rows: TableRow[]): ValidationError[] {
-  const errors: ValidationError[] = [];
-
-  for (const row of rows) {
-    // columnName must not be empty
-    if (!row.columnName.trim()) {
-      errors.push({ rowId: row.id, field: 'columnName', message: 'Column Name is required' });
-    }
-
-    // dataType must not be null/empty and must be in ALLOWED_DATA_TYPES
-    if (!row.dataType) {
-      errors.push({ rowId: row.id, field: 'dataType', message: 'DataType is required' });
-    } else if (!(ALLOWED_DATA_TYPES as readonly string[]).includes(row.dataType)) {
-      errors.push({ rowId: row.id, field: 'dataType', message: 'Invalid DataType value' });
-    }
-
-    // When dataType is 'String', length is required
-    if (row.dataType === 'String' && !row.length) {
-      errors.push({ rowId: row.id, field: 'length', message: 'Length is required when DataType is "String"' });
-    }
-
-    if (row.dataType === 'String' && Number(row.length) > 65535) {
-      errors.push({ rowId: row.id, field: 'length', message: 'String length cannot be greater than 65535' });
-    }
-
-    // When length is provided, must be a positive integer
-    if (row.length) {
-      const parsed = Number(row.length);
-      if (!Number.isInteger(parsed) || parsed <= 0) {
-        errors.push({ rowId: row.id, field: 'length', message: 'Length must be a positive integer' });
-      }
-    }
-
-    // sampleValue must not be empty
-    if (!row.sampleValue.trim()) {
-      errors.push({ rowId: row.id, field: 'sampleValue', message: 'Sample Value is required' });
-    }
-  }
-
-  return errors;
-}
-
 function getFieldError(errors: ValidationError[], rowId: string, field: ValidationField): string | undefined {
   return errors.find((e) => e.rowId === rowId && e.field === field)?.message;
 }
@@ -252,13 +216,14 @@ export const App = (): JSX.Element => {
   const context = useProductContext();
   const config = useConfig() as Record<string, unknown> | undefined;
   const preview = useMemo(() => isPreviewMode(), []);
-  const storageKey = useMemo(() => getStorageKey(context), [context]);
   const isPageEditing = context?.extension?.isEditing ?? false;
   const isConfiguring = context?.extension?.macro?.isConfiguring === true;
   const canEdit = preview || isConfiguring;
   const configValue = config?.[TABLE_DATA_CONFIG_KEY];
   const hasConfigValue = typeof configValue === 'string' && configValue.length > 0;
   const configuredTableData = useMemo(() => parseMacroTableData(configValue), [configValue]);
+  const storageIdentity = useMemo(() => getStorageIdentity(context), [context]);
+  const { storageKey, legacyStorageKey } = storageIdentity;
 
   const [localRows, setRows] = useState<TableRow[]>(() => (
     preview ? MOCK_ROWS : configuredTableData?.rows ?? []
@@ -289,17 +254,6 @@ export const App = (): JSX.Element => {
     rowsRef.current = rows;
     metadataRef.current = metadata;
   }, [rows, metadata]);
-  const storageIdentity = useMemo(() => getStorageIdentity(context), [context]);
-  const { storageKey, legacyStorageKey } = storageIdentity;
-  const isEditing = context?.extension?.isEditing ?? false;
-
-  const [rows, setRows] = useState<TableRow[]>(() => (preview ? MOCK_ROWS : []));
-  const [metadata, setMetadata] = useState<TableMetadata>(() => preview ? MOCK_METADATA : getDefaultMetadata());
-  const [loadedStorageKey, setLoadedStorageKey] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
-  const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-
   // Set up global error handlers on app initialization
   useEffect(() => {
     setupGlobalErrorHandlers();
@@ -312,7 +266,7 @@ export const App = (): JSX.Element => {
       return;
     }
 
-    invoke<TableData | null>('getTableData', { storageKey, macroId: storageKey })
+    invoke<TableData | null>('getTableData', { storageKey, legacyStorageKey })
       .then((data) => {
         const nextRows = data?.rows ?? [];
         const nextMetadata = data?.metadata ?? getDefaultMetadata();
@@ -321,20 +275,8 @@ export const App = (): JSX.Element => {
         setRows(nextRows);
         setMetadata(nextMetadata);
         setLegacyLoadComplete(true);
-    if (preview || !storageKey) {
-      return;
-    }
-
-    let cancelled = false;
-
-    invoke<TableData>('getTableData', { storageKey, legacyStorageKey })
-      .then((data) => {
-        if (cancelled) return;
-        setRows(data?.rows ?? []);
-        setMetadata(data?.metadata ?? getDefaultMetadata());
       })
       .catch((error: Error) => {
-        if (cancelled) return;
         console.error('Failed to load table data:', error);
         logError({
           message: 'Failed to load table data',
@@ -343,10 +285,14 @@ export const App = (): JSX.Element => {
         setLoadError('Failed to load the saved table data. Refresh the page to try again.');
         setLegacyLoadComplete(true);
       });
-  }, [configuredTableData, hasConfigValue, storageKey, preview]);
+  }, [configuredTableData, hasConfigValue, legacyStorageKey, storageKey, preview]);
 
   const persistPageDraft = useCallback((nextRows: TableRow[], nextMetadata: TableMetadata) => {
     if (!isConfiguring || preview) {
+      return;
+    }
+
+    if (validateRows(nextRows).length > 0) {
       return;
     }
 
@@ -395,17 +341,6 @@ export const App = (): JSX.Element => {
     setMetadata(nextMetadata);
     persistPageDraft(rowsRef.current, nextMetadata);
   }, [persistPageDraft]);
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoadedStorageKey(storageKey);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [storageKey, legacyStorageKey, preview]);
 
   const handleColumnNameChange = useCallback(
     (rowId: string, value: string) => {
@@ -553,56 +488,6 @@ export const App = (): JSX.Element => {
   const handleDeleteRow = useCallback((rowId: string) => {
     replaceRows(rowsRef.current.filter((row) => row.id !== rowId));
   }, [replaceRows]);
-    setRows((prev) => prev.filter((r) => r.id !== rowId));
-    setValidationErrors((prev) => prev.filter((e) => e.rowId !== rowId));
-  }, []);
-
-  const handleSave = useCallback(async () => {
-    // Clear previous messages
-    setSaveMessage(null);
-
-    // Client-side validation
-    const errors = validateRows(rows);
-    setValidationErrors(errors);
-    if (errors.length > 0) {
-      return;
-    }
-
-    if (preview) {
-      setSaveMessage({ type: 'success', text: 'Table saved successfully (preview mode)' });
-      globalThis.setTimeout(() => setSaveMessage(null), 3000);
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const response = await invoke<SaveTableDataResponse>('saveTableData', { storageKey, metadata, rows });
-      if (response?.success) {
-        setSaveMessage({ type: 'success', text: 'Table saved successfully' });
-        globalThis.setTimeout(() => setSaveMessage(null), 3000);
-      } else {
-        const serverErrors = response?.errors;
-        if (serverErrors && serverErrors.length > 0) {
-          setValidationErrors(serverErrors);
-          setSaveMessage({ type: 'error', text: 'Validation failed. Please fix the errors below.' });
-        } else {
-          setSaveMessage({ type: 'error', text: 'Failed to save table data' });
-        }
-      }
-    } catch (error: unknown) {
-      const err = error instanceof Error ? error : new Error(String(error));
-      console.error('Failed to save table data:', err);
-      logError({
-        message: 'Failed to save table data',
-        stack: err.stack || String(err),
-      });
-      setSaveMessage({ type: 'error', text: 'Failed to save table data' });
-    } finally {
-      setSaving(false);
-    }
-  }, [rows, metadata, storageKey, preview]);
-
-  const loading = !preview && (!context || Boolean(storageKey && loadedStorageKey !== storageKey));
 
   // Show spinner while loading
   if (loading) {
@@ -637,6 +522,13 @@ export const App = (): JSX.Element => {
         {(configurationError || loadError || persistenceError) && (
           <SectionMessage appearance="error">
             <Text>{configurationError || loadError || persistenceError}</Text>
+          </SectionMessage>
+        )}
+        {isConfiguring && validationErrors.length > 0 && (
+          <SectionMessage appearance="warning">
+            <Text>
+              Resolve the highlighted validation errors before saving. The last valid page draft is preserved.
+            </Text>
           </SectionMessage>
         )}
 
@@ -709,7 +601,7 @@ export const App = (): JSX.Element => {
               <Text weight="bold">DataType</Text>
             </Box>
             <Box xcss={colLengthStyles}>
-              <Text weight="bold">Length</Text>
+              <Text weight="bold">Length / Precision</Text>
             </Box>
             <Box xcss={colNullableStyles}>
               <Inline alignInline="center">
@@ -744,7 +636,11 @@ export const App = (): JSX.Element => {
           const dataTypeError = getFieldError(validationErrors, row.id, 'dataType');
           const lengthError = getFieldError(validationErrors, row.id, 'length');
           const sampleValueError = getFieldError(validationErrors, row.id, 'sampleValue');
-          const isLengthRequired = row.dataType === 'String';
+          const isLengthRequired = ['CHAR', 'VARCHAR', 'STRING', 'String', 'DECIMAL', 'NUMERIC']
+            .includes(row.dataType ?? '');
+          const lengthPlaceholder = row.dataType === 'DECIMAL' || row.dataType === 'NUMERIC'
+            ? 'e.g. 8,2'
+            : isLengthRequired ? 'Required' : 'Optional';
 
           return (
             <Box key={row.id} xcss={rowStyles}>
@@ -795,10 +691,10 @@ export const App = (): JSX.Element => {
                     <Box xcss={lengthError ? errorCellStyles : cellStyles}>
                       <Inline space="space.025" alignBlock="center">
                         <Textfield
-                          type="number"
+                          type="text"
                           value={row.length}
                           onChange={(e: { target?: { value?: string } }) => handleLengthChange(row.id, e.target?.value ?? '')}
-                          placeholder={isLengthRequired ? 'Required' : 'Optional'}
+                          placeholder={lengthPlaceholder}
                           isDisabled={!canEdit}
                         />
                         {isLengthRequired && (

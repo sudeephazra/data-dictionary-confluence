@@ -61,7 +61,6 @@ function setupContext(options: {
         },
         config,
         content: { id: TEST_CONTENT_ID },
-        ...overrides,
       },
     }),
   );
@@ -101,83 +100,6 @@ describe('App', () => {
     const values = screen.getAllByTestId('forge-textfield').map((field) => field.getAttribute('value'));
     expect(values).toContain('user-service');
     expect(values).toContain('user_id');
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    expect(screen.getByText(/No rows yet/i)).toBeInTheDocument();
-  });
-
-  it('loads data with a page- and macro-instance-scoped storage key', async () => {
-    setupContext();
-    mockGetTableData([]);
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(bridge.invocations).toContainEqual(
-        expect.objectContaining({
-          functionKey: 'getTableData',
-          payload: expect.objectContaining({
-            storageKey: TEST_STORAGE_KEY,
-            legacyStorageKey: TEST_LEGACY_STORAGE_KEY,
-          }),
-        }),
-      );
-    });
-  });
-
-  it('Add Row button adds a new empty row', async () => {
-    setupContext();
-    mockGetTableData([]);
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    // Find and click the Add Row button
-    const addButton = screen.getByText('Add Row');
-    await userEvent.click(addButton);
-
-    // Should now have Select elements rendered for the new row (DataType + Sort/Partition Key)
-    await waitFor(() => {
-      const selects = screen.getAllByTestId('forge-select');
-      expect(selects.length).toBeGreaterThanOrEqual(2);
-    });
-  });
-
-  it('Save button triggers validation and shows errors for empty columnName', async () => {
-    setupContext();
-    mockGetTableData([
-      { id: 'row-1', columnName: '', dataType: null, length: '', nullable: false, sortPartitionKey: null, copyToRedshift: false, sampleValue: '', pii: false },
-    ]);
-    mockSaveTableData();
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    // Click Save
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    // Validation errors should appear
-    await waitFor(() => {
-      expect(screen.getByText('Column Name is required')).toBeInTheDocument();
-      expect(screen.getByText('DataType is required')).toBeInTheDocument();
-      expect(screen.getByText('Sample Value is required')).toBeInTheDocument();
-    });
-
-    // invoke('saveTableData') should NOT have been called
-    expect(
-      bridge.invocations.filter((inv) => inv.functionKey === 'saveTableData'),
-    ).toHaveLength(0);
   });
 
   it('falls back to existing KVS data when the macro has not migrated yet', async () => {
@@ -189,25 +111,11 @@ describe('App', () => {
     await waitFor(() => {
       expect(bridge.invocations).toContainEqual(expect.objectContaining({
         functionKey: 'getTableData',
-        payload: expect.objectContaining({ macroId: TEST_MACRO_ID, storageKey: TEST_MACRO_ID }),
-      }));
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(bridge.invocations).toContainEqual(
-        expect.objectContaining({
-          functionKey: 'saveTableData',
-          payload: expect.objectContaining({
-            storageKey: TEST_STORAGE_KEY,
-            metadata: getDefaultMetadata(),
-            rows: [validRow],
-          }),
+        payload: expect.objectContaining({
+          storageKey: TEST_STORAGE_KEY,
+          legacyStorageKey: TEST_LEGACY_STORAGE_KEY,
         }),
-      );
+      }));
     });
     const values = screen.getAllByTestId('forge-textfield').map((field) => field.getAttribute('value'));
     expect(values).toContain('user_id');
@@ -269,25 +177,25 @@ describe('App', () => {
     expect(bridge.invocations.filter((call) => call.functionKey === 'saveTableData')).toHaveLength(0);
   });
 
-  it('adds and removes rows through page-draft submissions', async () => {
+  it('submits valid row deletion but keeps a newly added invalid row out of the page draft', async () => {
     setupContext({ isEditing: true, isConfiguring: true, configValue: configuredValue() });
 
     render(<App />);
     await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
 
-    await userEvent.click(screen.getByText('Add Row'));
+    await userEvent.click(screen.getAllByText('Delete')[0]);
     await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(1));
 
-    let payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as { config: Record<string, string> };
-    expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.rows).toHaveLength(2);
+    const payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as { config: Record<string, string> };
+    expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.rows).toHaveLength(0);
 
-    await userEvent.click(screen.getAllByText('Delete')[0]);
-    await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(2));
-    payload = (view.submit as jest.Mock).mock.calls.at(-1)?.[0] as { config: Record<string, string> };
-    expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.rows).toHaveLength(1);
+    await userEvent.click(screen.getByText('Add Row'));
+    await waitFor(() => expect(screen.getByText('Column Name is required.')).toBeInTheDocument());
+    expect(view.submit).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/last valid page draft is preserved/i)).toBeInTheDocument();
   });
 
-  it('shows validation feedback immediately without blocking the page draft', async () => {
+  it('shows validation feedback immediately for invalid configured data', async () => {
     const invalidRow: TableRow = {
       ...validRow,
       columnName: '',
@@ -299,9 +207,10 @@ describe('App', () => {
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText('Column Name is required')).toBeInTheDocument());
-    expect(screen.getByText('DataType is required')).toBeInTheDocument();
-    expect(screen.getByText('Sample Value is required')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('Column Name is required.')).toBeInTheDocument());
+    expect(screen.getByText('DataType is required.')).toBeInTheDocument();
+    expect(screen.getByText('Sample Value is required for a non-nullable column.')).toBeInTheDocument();
+    expect(screen.getByText(/last valid page draft is preserved/i)).toBeInTheDocument();
   });
 
   it('retains the Redshift string-length validation in the page editor', async () => {
@@ -314,8 +223,33 @@ describe('App', () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByText('String length cannot be greater than 65535')).toBeInTheDocument();
+      expect(screen.getByText('String length cannot be greater than 65535.')).toBeInTheDocument();
     });
+  });
+
+  it('does not submit an invalid sample and resumes draft updates after correction', async () => {
+    setupContext({
+      isEditing: true,
+      isConfiguring: true,
+      configValue: configuredValue([{ ...validRow, dataType: 'VARCHAR', length: '3', sampleValue: 'abc' }]),
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument());
+
+    const sampleField = screen.getByTestId('forge-textarea');
+    fireEvent.change(sampleField, { target: { value: 'four' } });
+
+    await waitFor(() => {
+      expect(screen.getByText('Sample value exceeds the maximum length of 3 characters.')).toBeInTheDocument();
+    });
+    expect(view.submit).not.toHaveBeenCalled();
+
+    fireEvent.change(sampleField, { target: { value: 'two' } });
+    await waitFor(() => expect(view.submit).toHaveBeenCalledTimes(1));
+
+    const payload = (view.submit as jest.Mock).mock.calls[0][0] as { config: Record<string, string> };
+    expect(parseMacroTableData(payload.config[TABLE_DATA_CONFIG_KEY])?.rows[0].sampleValue).toBe('two');
   });
 
   it('displays page-draft submission failures to the user', async () => {
@@ -328,23 +262,6 @@ describe('App', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/could not be added to the page draft/i)).toBeInTheDocument();
-      expect(screen.queryByTestId('forge-spinner')).not.toBeInTheDocument();
-    });
-
-    const saveButton = screen.getByText('Save');
-    await userEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(bridge.invocations).toContainEqual(
-        expect.objectContaining({
-          functionKey: 'saveTableData',
-          payload: expect.objectContaining({
-            storageKey: TEST_STORAGE_KEY,
-            metadata: customMetadata,
-            rows: [validRow],
-          }),
-        }),
-      );
     });
   });
 

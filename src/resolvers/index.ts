@@ -37,15 +37,13 @@ const resolver = new Resolver();
 
 // Retrieve table data for a macro instance
 resolver.define('getTableData', async (req: ResolverRequest) => {
-  console.log("Starting resolver for getTableData");
+  console.log('Starting resolver for getTableData');
   const payload = req.payload as GetTableDataPayload;
-  const storageKey = getStorageKey(payload);
-  if (!storageKey) {
+  const storageKey = getRequestedStorageKey(payload);
+  if (!storageKey?.trim()) {
     console.log('[getTableData] No legacy storage key was provided');
     return null;
   }
-  const storageKeyName = `table:${storageKey}`;
-  const storageKey = getRequestedStorageKey(payload);
   const legacyStorageKey = payload?.legacyStorageKey
     ?? (payload?.storageKey && payload.macroId !== payload.storageKey ? payload.macroId : undefined);
   const storageKeyName = getStorageKeyName(storageKey);
@@ -62,27 +60,6 @@ resolver.define('getTableData', async (req: ResolverRequest) => {
     return normalizeTableData(data);
   } catch (error) {
     console.error('[getTableData] Storage read failed', { storageKey, error });
-    throw error;
-  }
-});
-
-// Save table data for a macro instance (with validation)
-resolver.define('saveTableData', async (req: ResolverRequest) => {
-  const payload = req.payload as SaveTableDataPayload;
-  const { metadata, rows } = payload;
-
-  const errors = validateRows(rows);
-  if (errors.length > 0) {
-    return { success: false, errors } as SaveTableDataResponse;
-  }
-
-  const storageKey = getRequestedStorageKey(payload);
-  const storageKeyName = getStorageKeyName(storageKey);
-  try {
-    await kvs.set(storageKeyName, { metadata, rows, updatedAt: new Date().toISOString() });
-    return { success: true } as SaveTableDataResponse;
-  } catch (error) {
-    console.error('[saveTableData] Storage write failed', { storageKey, error });
     throw error;
   }
 });
