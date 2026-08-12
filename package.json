@@ -1,6 +1,6 @@
 {
   "name": "redshift-data-dictionary",
-  "version": "0.0.1",
+  "version": "3.0.0",
   "main": "index.js",
   "license": "SEE LICENSE IN LICENSE.txt",
   "private": true,
